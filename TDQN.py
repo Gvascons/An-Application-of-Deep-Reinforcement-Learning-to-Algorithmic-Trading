@@ -33,6 +33,11 @@ from tradingPerformance import PerformanceEstimator
 from dataAugmentation import DataAugmentation
 from tradingEnv import TradingEnv
 
+import os
+
+# Create Figures directory if it doesn't exist
+if not os.path.exists('Figures'):
+    os.makedirs('Figures')
 
 
 ###############################################################################
@@ -377,7 +382,8 @@ class TDQN:
         self.iterations = 0
 
         # Initialization of the tensorboard writer
-        self.writer = SummaryWriter('runs/' + datetime.datetime.now().strftime("%d/%m/%Y-%H:%M:%S"))
+        # self.writer = SummaryWriter('runs/' + datetime.datetime.now().strftime("%d/%m/%Y-%H:%M:%S"))
+        self.writer = SummaryWriter('runs/run_' + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
 
     
     def getNormalizationCoefficients(self, tradingEnv):
