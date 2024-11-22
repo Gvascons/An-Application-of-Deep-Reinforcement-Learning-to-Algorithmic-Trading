@@ -270,8 +270,7 @@ class TradingSimulator:
     def plotEntireTrading(self, trainingEnv, testingEnv):
         """
         GOAL: Plot the entire trading activity, with both the training
-              and testing phases rendered on the same graph for
-              comparison purposes.
+              and testing phases rendered on the same graph.
         
         INPUTS: - trainingEnv: Trading environment for training.
                 - testingEnv: Trading environment for testing.
@@ -319,8 +318,18 @@ class TradingSimulator:
         # Generation of the two legends and plotting
         ax1.legend(["Price", "Long",  "Short", "Train/Test separation"])
         ax2.legend(["Capital", "Long", "Short", "Train/Test separation"])
-        plt.savefig(''.join(['Figures/', str(trainingEnv.marketSymbol), '_TrainingTestingRendering', '.png'])) 
-        #plt.show()
+        
+        # Save to the run-specific directory
+        figures_dir = getattr(trainingEnv, 'figures_dir', None) or getattr(testingEnv, 'figures_dir', None)
+        
+        if figures_dir:
+            save_path = os.path.join(figures_dir, f'{str(trainingEnv.marketSymbol)}_TrainingTestingRendering.png')
+        else:
+            # Fallback to default directory
+            save_path = ''.join(['Figures/', str(trainingEnv.marketSymbol), '_TrainingTestingRendering', '.png'])
+        
+        plt.savefig(save_path)
+        plt.close(fig)
 
 
     def simulateNewStrategy(self, strategyName, stockName,
@@ -409,7 +418,7 @@ class TradingSimulator:
         if ai:
             strategyModule = importlib.import_module(str(strategy))
             className = getattr(strategyModule, strategy)
-            tradingStrategy = className(observationSpace, actionSpace)
+            tradingStrategy = className(observationSpace, actionSpace, marketSymbol=stock)
         else:
             strategyModule = importlib.import_module('classicalStrategy')
             className = getattr(strategyModule, strategy)

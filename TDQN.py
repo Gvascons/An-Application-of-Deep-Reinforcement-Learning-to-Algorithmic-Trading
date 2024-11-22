@@ -15,6 +15,7 @@ import math
 import random
 import copy
 import datetime
+import shutil
 
 import numpy as np
 
@@ -317,8 +318,8 @@ class TDQN:
                                      (Epsilon-Greedy exploration technique).        
     """
 
-    def __init__(self, observationSpace, actionSpace, numberOfNeurons=numberOfNeurons, dropout=dropout, 
-                 gamma=gamma, learningRate=learningRate, targetNetworkUpdate=targetNetworkUpdate,
+    def __init__(self, observationSpace, actionSpace, marketSymbol='UNKNOWN', numberOfNeurons=numberOfNeurons, 
+                 dropout=dropout, gamma=gamma, learningRate=learningRate, targetNetworkUpdate=targetNetworkUpdate,
                  epsilonStart=epsilonStart, epsilonEnd=epsilonEnd, epsilonDecay=epsilonDecay,
                  capacity=capacity, batchSize=batchSize):
         """
@@ -328,17 +329,15 @@ class TDQN:
         
         INPUTS: - observationSpace: Size of the RL observation space.
                 - actionSpace: Size of the RL action space.
+                - marketSymbol: Trading symbol for the stock (e.g. 'AAPL', 'AMZN')
                 - numberOfNeurons: Number of neurons per layer in the Deep Neural Network.
                 - dropout: Droupout probability value (handling of overfitting).
                 - gamma: Discount factor of the DQN algorithm.
                 - learningRate: Learning rate of the ADAM optimizer.
                 - targetNetworkUpdate: Update frequency of the target network.
-                - epsilonStart: Initial (maximum) value of Epsilon, from the
-                                Epsilon-Greedy exploration technique.
-                - epsilonEnd: Final (minimum) value of Epsilon, from the
-                                Epsilon-Greedy exploration technique.
-                - epsilonDecay: Decay factor (exponential) of Epsilon, from the
-                                Epsilon-Greedy exploration technique.
+                - epsilonStart: Initial (maximum) value of Epsilon
+                - epsilonEnd: Final (minimum) value of Epsilon
+                - epsilonDecay: Decay factor (exponential) of Epsilon
                 - capacity: Capacity of the Experience Replay memory.
                 - batchSize: Size of the batch to sample from the replay memory.        
         
@@ -381,9 +380,19 @@ class TDQN:
         # Initialization of the iterations counter
         self.iterations = 0
 
-        # Initialization of the tensorboard writer
-        # self.writer = SummaryWriter('runs/' + datetime.datetime.now().strftime("%d/%m/%Y-%H:%M:%S"))
-        self.writer = SummaryWriter('runs/run_' + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+        # Store market symbol
+        self.marketSymbol = marketSymbol
+        
+        # Create a unique run identifier with timestamp and market symbol
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_id = f"{self.marketSymbol}_{timestamp}"
+        
+        # Create run-specific directories
+        self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+        os.makedirs(self.figures_dir, exist_ok=True)
+        
+        # Initialize tensorboard writer with run-specific directory
+        self.writer = SummaryWriter(f'runs/run_{self.run_id}')
 
     
     def getNormalizationCoefficients(self, tradingEnv):
@@ -625,30 +634,22 @@ class TDQN:
             self.policyNetwork.eval()
 
 
-    def training(self, trainingEnv, trainingParameters=[],
-                 verbose=False, rendering=False, plotTraining=False, showPerformance=False):
+    def training(self, trainingEnv, trainingParameters=[], verbose=True, rendering=True, plotTraining=True, showPerformance=True):
         """
         GOAL: Train the RL trading agent by interacting with its trading environment.
+        """
+        # Create run-specific directories and setup tensorboard
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
+        self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+        os.makedirs(self.figures_dir, exist_ok=True)
         
-        INPUTS: - trainingEnv: Training RL environment (known).
-                - trainingParameters: Additional parameters associated
-                                      with the training phase (e.g. the number
-                                      of episodes).  
-                - verbose: Enable the printing of a training feedback.
-                - rendering: Enable the training environment rendering.
-                - plotTraining: Enable the plotting of the training results.
-                - showPerformance: Enable the printing of a table summarizing
-                                   the trading strategy performance.
+        # Pass the figures directory to the training environment
+        trainingEnv.figures_dir = self.figures_dir
         
-        OUTPUTS: - trainingEnv: Training RL environment.
-        """
-
-        """
-        # Compute and plot the expected performance of the trading policy
-        trainingEnv = self.plotExpectedPerformance(trainingEnv, trainingParameters, iterations=50)
-        return trainingEnv
-        """
-
+        # Initialize tensorboard writer
+        self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+        
         # Apply data augmentation techniques to improve the training set
         dataAugmentation = DataAugmentation()
         trainingEnvList = dataAugmentation.generate(trainingEnv)
@@ -760,7 +761,7 @@ class TDQN:
 
         # If required, show the rendering of the trading environment
         if rendering:
-            trainingEnv.render()
+            self.render_to_dir(trainingEnv)
 
         # If required, plot the training results
         if plotTraining:
@@ -769,10 +770,11 @@ class TDQN:
             ax.plot(performanceTrain)
             ax.plot(performanceTest)
             ax.legend(["Training", "Testing"])
-            plt.savefig(''.join(['Figures/', str(marketSymbol), '_TrainingTestingPerformance', '.png']))
-            #plt.show()
+            plt.savefig(os.path.join(self.figures_dir, f'TrainingTestingPerformance.png'))
+            plt.close(fig)
+            
             for i in range(len(trainingEnvList)):
-                self.plotTraining(score[i][:episode], marketSymbol)
+                self.plotTraining(score[i][:episode])
 
         # If required, print the strategy performance in a table
         if showPerformance:
@@ -788,17 +790,10 @@ class TDQN:
     def testing(self, trainingEnv, testingEnv, rendering=False, showPerformance=False):
         """
         GOAL: Test the RL agent trading policy on a new trading environment
-              in order to assess the trading strategy performance.
-        
-        INPUTS: - trainingEnv: Training RL environment (known).
-                - testingEnv: Unknown trading RL environment.
-                - rendering: Enable the trading environment rendering.
-                - showPerformance: Enable the printing of a table summarizing
-                                   the trading strategy performance.
-        
-        OUTPUTS: - testingEnv: Trading environment backtested.
         """
-
+        # Pass the figures directory to the testing environment
+        testingEnv.figures_dir = self.figures_dir
+        
         # Apply data augmentation techniques to process the testing set
         dataAugmentation = DataAugmentation()
         testingEnvSmoothed = dataAugmentation.lowPassFilter(testingEnv, filterOrder)
@@ -831,8 +826,8 @@ class TDQN:
 
         # If required, show the rendering of the trading environment
         if rendering:
-            testingEnv.render()
-            self.plotQValues(QValues0, QValues1, testingEnv.marketSymbol)
+            self.render_to_dir(testingEnv)
+            self.plotQValues(QValues0, QValues1)
 
         # If required, print the strategy performance in a table
         if showPerformance:
@@ -842,13 +837,12 @@ class TDQN:
         return testingEnv
 
 
-    def plotTraining(self, score, marketSymbol):
+    def plotTraining(self, score):
         """
         GOAL: Plot the training phase results
               (score, sum of rewards).
         
         INPUTS: - score: Array of total episode rewards.
-                - marketSymbol: Stock market trading symbol.
         
         OUTPUTS: /
         """
@@ -856,17 +850,16 @@ class TDQN:
         fig = plt.figure()
         ax1 = fig.add_subplot(111, ylabel='Total reward collected', xlabel='Episode')
         ax1.plot(score)
-        plt.savefig(''.join(['Figures/', str(marketSymbol), 'TrainingResults', '.png']))
-        #plt.show()
+        plt.savefig(os.path.join(self.figures_dir, f'TrainingResults.png'))
+        plt.close(fig)
 
     
-    def plotQValues(self, QValues0, QValues1, marketSymbol):
+    def plotQValues(self, QValues0, QValues1):
         """
         Plot sequentially the Q values related to both actions.
         
         :param: - QValues0: Array of Q values linked to action 0.
                 - QValues1: Array of Q values linked to action 1.
-                - marketSymbol: Stock market trading symbol.
         
         :return: /
         """
@@ -876,8 +869,8 @@ class TDQN:
         ax1.plot(QValues0)
         ax1.plot(QValues1)
         ax1.legend(['Short', 'Long'])
-        plt.savefig(''.join(['Figures/', str(marketSymbol), '_QValues', '.png']))
-        #plt.show()
+        plt.savefig(os.path.join(self.figures_dir, f'QValues.png'))
+        plt.close(fig)
 
 
     def plotExpectedPerformance(self, trainingEnv, trainingParameters=[], iterations=10):
@@ -1023,19 +1016,25 @@ class TDQN:
             ax.plot([performanceTrain[e][i] for e in range(trainingParameters[0])])
             ax.plot([performanceTest[e][i] for e in range(trainingParameters[0])])
             ax.legend(["Training", "Testing"])
-            plt.savefig(''.join(['Figures/', str(marketSymbol), '_TrainingTestingPerformance', str(i+1), '.png']))
-            #plt.show()
+            plt.savefig(os.path.join(self.figures_dir, 
+                       f'TrainingTestingPerformance_{i+1}.png'))
+            plt.close(fig)
 
         # Plot the expected performance of the intelligent DRL trading agent
         fig = plt.figure()
         ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
         ax.plot(expectedPerformanceTrain)
         ax.plot(expectedPerformanceTest)
-        ax.fill_between(range(len(expectedPerformanceTrain)), expectedPerformanceTrain-stdPerformanceTrain, expectedPerformanceTrain+stdPerformanceTrain, alpha=0.25)
-        ax.fill_between(range(len(expectedPerformanceTest)), expectedPerformanceTest-stdPerformanceTest, expectedPerformanceTest+stdPerformanceTest, alpha=0.25)
+        ax.fill_between(range(len(expectedPerformanceTrain)), 
+                       expectedPerformanceTrain-stdPerformanceTrain, 
+                       expectedPerformanceTrain+stdPerformanceTrain, alpha=0.25)
+        ax.fill_between(range(len(expectedPerformanceTest)),
+                       expectedPerformanceTest-stdPerformanceTest,
+                       expectedPerformanceTest+stdPerformanceTest, alpha=0.25)
         ax.legend(["Training", "Testing"])
-        plt.savefig(''.join(['Figures/', str(marketSymbol), '_TrainingTestingExpectedPerformance', '.png']))
-        #plt.show()
+        plt.savefig(os.path.join(self.figures_dir, 
+                   f'TrainingTestingExpectedPerformance.png'))
+        plt.close(fig)
 
         # Closing of the tensorboard writer
         self.writer.close()
@@ -1082,5 +1081,21 @@ class TDQN:
         plt.plot([self.epsilonValue(i) for i in range(10*epsilonDecay)])
         plt.xlabel("Iterations")
         plt.ylabel("Epsilon value")
-        plt.savefig(''.join(['Figures/', 'EpsilonAnnealing', '.png']))
-        #plt.show()
+        plt.savefig(os.path.join(self.figures_dir, 'EpsilonAnnealing.png'))
+        plt.close()
+
+    def render_to_dir(self, env):
+        """
+        GOAL: Render the environment and move the file to the run-specific directory
+        
+        INPUTS: - env: Trading environment to render
+        """
+        # Render using the environment's method
+        env.render()
+        
+        # Move the file from default location to run directory
+        src_path = ''.join(['Figures/', str(env.marketSymbol), '_Rendering', '.png'])
+        dst_path = os.path.join(self.figures_dir, ''.join([str(env.marketSymbol), '_Rendering', '.png']))
+        
+        if os.path.exists(src_path):
+            shutil.move(src_path, dst_path)
