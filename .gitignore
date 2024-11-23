@@ -3,3 +3,6 @@ Figures/
 
 # Ignore the 'runs' folder
 runs/
+
+# Ignore the 'Results' folder
+Results/

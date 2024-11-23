@@ -11,6 +11,9 @@ Institution: University of Liège
 ###############################################################################
 
 import numpy as np
+import os
+import pandas as pd
+import datetime
 
 from tabulate import tabulate
 from matplotlib import pyplot as plt
@@ -323,22 +326,43 @@ class PerformanceEstimator:
         return self.performanceTable
 
 
-    def displayPerformance(self, name):
+    def displayPerformance(self, name, phase='training'):
         """
-        GOAL: Compute and display the entire set of performance indicators
-              in a table.
+        Compute, display and save the performance metrics.
         
-        INPUTS: - name: Name of the element (strategy or stock) analysed.
-        
-        OUTPUTS:    - performanceTable: Table summarizing the performance of 
-                                        a trading activity.
+        INPUTS: - name: Name of the strategy
+                - phase: Either 'training' or 'testing'
         """
-        
         # Generation of the performance table
         self.computePerformance()
         
-        # Display the table in the console (Tabulate for the beauty of the print operation)
+        # Display the table in the console
         headers = ["Performance Indicator", name]
         tabulation = tabulate(self.performanceTable, headers, tablefmt="fancy_grid", stralign="center")
+        print(f"\n{phase.upper()} PERFORMANCE:")
         print(tabulation)
+
+        try:
+            # Ensure Results directory exists
+            os.makedirs('Results', exist_ok=True)
+            
+            # Create filename using run_id
+            run_id = getattr(self, 'run_id', None)
+            if run_id is None:
+                print("\nWarning: No run_id provided, using current timestamp")
+                run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            filename = os.path.join('Results', f'performance_metrics_{name}_{phase}_{run_id}.csv')
+            
+            # Convert performance table to dict for easier saving
+            metrics_dict = {row[0]: row[1] for row in self.performanceTable}
+            
+            # Save to CSV
+            pd.DataFrame([metrics_dict]).to_csv(filename, index=False)
+            print(f"\nPerformance metrics saved to: {filename}")
+        
+        except Exception as e:
+            print(f"\nWarning: Could not save performance metrics to file: {str(e)}")
+        
+        return self.performanceTable
     

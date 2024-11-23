@@ -383,10 +383,11 @@ class TDQN:
         # Store market symbol
         self.marketSymbol = marketSymbol
         
-        # Initialize writer as None - we'll create it when training starts
+        # Initialize writer and directories as None - we'll create them when training starts
         self.writer = None
         self.run_id = None
         self.figures_dir = None
+        self.results_dir = None
 
     
     def getNormalizationCoefficients(self, tradingEnv):
@@ -633,18 +634,21 @@ class TDQN:
         GOAL: Train the RL trading agent by interacting with its trading environment.
         """
         try:
-            # Only create new directories and writer if they don't exist
-            if self.writer is None:
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
-                self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
-                os.makedirs(self.figures_dir, exist_ok=True)
-                
-                # Initialize tensorboard writer
-                self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            # Create run-specific directories and ID
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
             
-            # Pass the figures directory to the training environment
+            # Create base directories
+            self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+            os.makedirs(self.figures_dir, exist_ok=True)
+            os.makedirs('Results', exist_ok=True)
+            
+            # Initialize tensorboard writer
+            self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            
+            # Pass the directories to the training environment
             trainingEnv.figures_dir = self.figures_dir
+            trainingEnv.results_dir = self.results_dir
             
             # Apply data augmentation techniques to improve the training set
             dataAugmentation = DataAugmentation()
@@ -765,10 +769,11 @@ class TDQN:
                 for i in range(len(trainingEnvList)):
                     self.plotTraining(score[i][:episode])
 
-            # If required, print the strategy performance in a table
+            # If required, print and save the strategy performance
             if showPerformance:
                 analyser = PerformanceEstimator(trainingEnv.data)
-                analyser.displayPerformance('TDQN')
+                analyser.run_id = self.run_id  # Pass the full run_id
+                analyser.displayPerformance('TDQN', phase='training')
             
             return trainingEnv
         
@@ -782,52 +787,58 @@ class TDQN:
 
     def testing(self, trainingEnv, testingEnv, rendering=False, showPerformance=False):
         """
-        GOAL: Test the RL agent trading policy on a new trading environment
+        GOAL: Apply the trained Deep Neural Network on a testing
+              trading environment.
+        
+        INPUTS: - trainingEnv: Training environment.
+                - testingEnv: Testing environment.
+                - rendering: Enable the rendering of the environment.
+                - showPerformance: Enable the computation and display
+                                  of the performance indicators.
+        
+        OUTPUTS: - testingEnv: Trading environment after testing.
         """
-        # Pass the figures directory to the testing environment
-        testingEnv.figures_dir = self.figures_dir
         
-        # Apply data augmentation techniques to process the testing set
-        dataAugmentation = DataAugmentation()
-        testingEnvSmoothed = dataAugmentation.lowPassFilter(testingEnv, filterOrder)
-        trainingEnv = dataAugmentation.lowPassFilter(trainingEnv, filterOrder)
-
-        # Initialization of some RL variables
-        coefficients = self.getNormalizationCoefficients(trainingEnv)
-        state = self.processState(testingEnvSmoothed.reset(), coefficients)
-        testingEnv.reset()
-        QValues0 = []
-        QValues1 = []
-        done = 0
-
-        # Interact with the environment until the episode termination
-        while done == 0:
-
-            # Choose an action according to the RL policy and the current RL state
-            action, _, QValues = self.chooseAction(state)
+        try:
+            # Set the DNN in evaluation mode
+            self.policyNetwork.eval()
+            
+            # Reset the testing environment and get the corresponding initial state
+            coefficients = self.getNormalizationCoefficients(trainingEnv)
+            testingEnv.reset()
+            state = self.processState(testingEnv.state, coefficients)
+            done = 0
+            
+            # Interact with the testing environment until termination
+            while done == 0:
                 
-            # Interact with the environment with the chosen action
-            nextState, _, done, _ = testingEnvSmoothed.step(action)
-            testingEnv.step(action)
+                # Choose an action according to the RL policy and the current RL state
+                with torch.no_grad():
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                    q_values = self.policyNetwork(state_tensor)
+                    action = q_values.max(1)[1].item()  # Get the action with highest Q-value
                 
-            # Update the new state
-            state = self.processState(nextState, coefficients)
-
-            # Storing of the Q values
-            QValues0.append(QValues[0])
-            QValues1.append(QValues[1])
-
-        # If required, show the rendering of the trading environment
-        if rendering:
-            self.render_to_dir(testingEnv)
-            self.plotQValues(QValues0, QValues1)
-
-        # If required, print the strategy performance in a table
-        if showPerformance:
-            analyser = PerformanceEstimator(testingEnv.data)
-            analyser.displayPerformance('TDQN')
-        
-        return testingEnv
+                # Interact with the environment with the chosen action
+                nextState, _, done, _ = testingEnv.step(action)
+                
+                # Update the RL state
+                state = self.processState(nextState, coefficients)
+            
+            # If required, show the rendering of the testing environment
+            if rendering:
+                self.render_to_dir(testingEnv)
+                
+            # If required, compute and display the strategy performance
+            if showPerformance:
+                analyser = PerformanceEstimator(testingEnv.data)
+                analyser.run_id = self.run_id
+                analyser.displayPerformance('TDQN', phase='testing')
+                
+            return testingEnv
+            
+        except Exception as e:
+            print(f"Testing error: {str(e)}")
+            raise
 
 
     def plotTraining(self, score):
