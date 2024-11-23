@@ -1,0 +1,5 @@
+# Ignore the 'Figures' folder
+Figures/
+
+# Ignore the 'runs' folder
+runs/

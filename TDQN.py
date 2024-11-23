@@ -383,16 +383,10 @@ class TDQN:
         # Store market symbol
         self.marketSymbol = marketSymbol
         
-        # Create a unique run identifier with timestamp and market symbol
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_id = f"{self.marketSymbol}_{timestamp}"
-        
-        # Create run-specific directories
-        self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
-        os.makedirs(self.figures_dir, exist_ok=True)
-        
-        # Initialize tensorboard writer with run-specific directory
-        self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+        # Initialize writer as None - we'll create it when training starts
+        self.writer = None
+        self.run_id = None
+        self.figures_dir = None
 
     
     def getNormalizationCoefficients(self, tradingEnv):
@@ -638,38 +632,39 @@ class TDQN:
         """
         GOAL: Train the RL trading agent by interacting with its trading environment.
         """
-        # Create run-specific directories and setup tensorboard
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
-        self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
-        os.makedirs(self.figures_dir, exist_ok=True)
-        
-        # Pass the figures directory to the training environment
-        trainingEnv.figures_dir = self.figures_dir
-        
-        # Initialize tensorboard writer
-        self.writer = SummaryWriter(f'runs/run_{self.run_id}')
-        
-        # Apply data augmentation techniques to improve the training set
-        dataAugmentation = DataAugmentation()
-        trainingEnvList = dataAugmentation.generate(trainingEnv)
-
-        # Initialization of some variables tracking the training and testing performances
-        if plotTraining:
-            # Training performance
-            performanceTrain = []
-            score = np.zeros((len(trainingEnvList), trainingParameters[0]))
-            # Testing performance
-            marketSymbol = trainingEnv.marketSymbol
-            startingDate = trainingEnv.endingDate
-            endingDate = '2020-1-1'
-            money = trainingEnv.data['Money'][0]
-            stateLength = trainingEnv.stateLength
-            transactionCosts = trainingEnv.transactionCosts
-            testingEnv = TradingEnv(marketSymbol, startingDate, endingDate, money, stateLength, transactionCosts)
-            performanceTest = []
-
         try:
+            # Only create new directories and writer if they don't exist
+            if self.writer is None:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
+                self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+                os.makedirs(self.figures_dir, exist_ok=True)
+                
+                # Initialize tensorboard writer
+                self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            
+            # Pass the figures directory to the training environment
+            trainingEnv.figures_dir = self.figures_dir
+            
+            # Apply data augmentation techniques to improve the training set
+            dataAugmentation = DataAugmentation()
+            trainingEnvList = dataAugmentation.generate(trainingEnv)
+
+            # Initialization of some variables tracking the training and testing performances
+            if plotTraining:
+                # Training performance
+                performanceTrain = []
+                score = np.zeros((len(trainingEnvList), trainingParameters[0]))
+                # Testing performance
+                marketSymbol = trainingEnv.marketSymbol
+                startingDate = trainingEnv.endingDate
+                endingDate = '2020-1-1'
+                money = trainingEnv.data['Money'][0]
+                stateLength = trainingEnv.stateLength
+                transactionCosts = trainingEnv.transactionCosts
+                testingEnv = TradingEnv(marketSymbol, startingDate, endingDate, money, stateLength, transactionCosts)
+                performanceTest = []
+
             # If required, print the training progression
             if verbose:
                 print("Training progression (hardware selected => " + str(self.device) + "):")
@@ -750,41 +745,39 @@ class TDQN:
                     self.writer.add_scalar('Testing performance (Sharpe Ratio)', performance, episode)
                     testingEnv.reset()
         
-        except KeyboardInterrupt:
-            print()
-            print("WARNING: Training prematurely interrupted...")
-            print()
-            self.policyNetwork.eval()
+            # Assess the algorithm performance on the training trading environment
+            trainingEnv = self.testing(trainingEnv, trainingEnv)
 
-        # Assess the algorithm performance on the training trading environment
-        trainingEnv = self.testing(trainingEnv, trainingEnv)
+            # If required, show the rendering of the trading environment
+            if rendering:
+                self.render_to_dir(trainingEnv)
 
-        # If required, show the rendering of the trading environment
-        if rendering:
-            self.render_to_dir(trainingEnv)
+            # If required, plot the training results
+            if plotTraining:
+                fig = plt.figure()
+                ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
+                ax.plot(performanceTrain)
+                ax.plot(performanceTest)
+                ax.legend(["Training", "Testing"])
+                plt.savefig(os.path.join(self.figures_dir, f'TrainingTestingPerformance.png'))
+                plt.close(fig)
+                
+                for i in range(len(trainingEnvList)):
+                    self.plotTraining(score[i][:episode])
 
-        # If required, plot the training results
-        if plotTraining:
-            fig = plt.figure()
-            ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
-            ax.plot(performanceTrain)
-            ax.plot(performanceTest)
-            ax.legend(["Training", "Testing"])
-            plt.savefig(os.path.join(self.figures_dir, f'TrainingTestingPerformance.png'))
-            plt.close(fig)
+            # If required, print the strategy performance in a table
+            if showPerformance:
+                analyser = PerformanceEstimator(trainingEnv.data)
+                analyser.displayPerformance('TDQN')
             
-            for i in range(len(trainingEnvList)):
-                self.plotTraining(score[i][:episode])
-
-        # If required, print the strategy performance in a table
-        if showPerformance:
-            analyser = PerformanceEstimator(trainingEnv.data)
-            analyser.displayPerformance('TDQN')
+            return trainingEnv
         
-        # Closing of the tensorboard writer
-        self.writer.close()
-        
-        return trainingEnv
+        except Exception as e:
+            print(f"Training error: {str(e)}")
+            raise
+        finally:
+            if self.writer is not None:
+                self.writer.flush()  # Ensure all pending events are written
 
 
     def testing(self, trainingEnv, testingEnv, rendering=False, showPerformance=False):
@@ -1099,3 +1092,10 @@ class TDQN:
         
         if os.path.exists(src_path):
             shutil.move(src_path, dst_path)
+
+    def __del__(self):
+        """
+        Destructor to ensure writer is properly closed when object is deleted
+        """
+        if hasattr(self, 'writer') and self.writer is not None:
+            self.writer.close()
