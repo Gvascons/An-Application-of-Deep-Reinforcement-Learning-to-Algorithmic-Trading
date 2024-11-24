@@ -148,7 +148,8 @@ strategies = {
 
 # Dictionary listing the AI trading strategies supported
 strategiesAI = {
-    'TDQN' : 'TDQN'
+    'TDQN' : 'TDQN',
+    'PPO' : 'PPO'
 }
 
 
@@ -319,7 +320,7 @@ class TradingSimulator:
         ax1.legend(["Price", "Long",  "Short", "Train/Test separation"])
         ax2.legend(["Capital", "Long", "Short", "Train/Test separation"])
         
-        # Save to the run-specific directory
+        # Get the figures directory from either environment
         figures_dir = getattr(trainingEnv, 'figures_dir', None) or getattr(testingEnv, 'figures_dir', None)
         
         if figures_dir:
