@@ -366,7 +366,7 @@ class PPO:
                     analyser = PerformanceEstimator(trainingEnv.data)
                     train_performance = analyser.computeSharpeRatio()
                     performanceTrain.append(train_performance)
-                    self.writer.add_scalar('Training/Sharpe_Ratio', train_performance, episode)
+                    self.writer.add_scalar('Training performance (Sharpe Ratio)', train_performance, episode)
                     trainingEnv.reset()
 
                     # Testing performance
@@ -374,7 +374,7 @@ class PPO:
                     analyser = PerformanceEstimator(testingEnv.data)
                     test_performance = analyser.computeSharpeRatio()
                     performanceTest.append(test_performance)
-                    self.writer.add_scalar('Testing/Sharpe_Ratio', test_performance, episode)
+                    self.writer.add_scalar('Testing performance (Sharpe Ratio)', test_performance, episode)
                     testingEnv.reset()
 
             # Assess the algorithm performance on the training trading environment
@@ -400,7 +400,7 @@ class PPO:
                     fig = plt.figure()
                     ax1 = fig.add_subplot(111, ylabel='Total reward collected', xlabel='Episode')
                     ax1.plot(score[i, :])
-                    plt.savefig(os.path.join(self.figures_dir, f'TrainingResults_{i}.png'))
+                    plt.savefig(os.path.join(self.figures_dir, f'TrainingResults.png'))
                     plt.close(fig)
 
             # If required, print and save the strategy performance
