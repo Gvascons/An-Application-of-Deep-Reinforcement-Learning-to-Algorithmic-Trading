@@ -278,7 +278,7 @@ class PPO:
         try:
             # Create run-specific directories and ID at the start
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
+            self.run_id = f"PPO_{trainingEnv.marketSymbol}_{timestamp}"
             
             # Create base directories
             self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
