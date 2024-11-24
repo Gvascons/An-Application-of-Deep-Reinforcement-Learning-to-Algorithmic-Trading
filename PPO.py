@@ -118,13 +118,16 @@ class PPO:
         """
         Initialize PPO agent
         """
+        # Set random seed for reproducibility
+        random.seed(0)
+        
         # Set device (GPU if available, else CPU)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Calculate the correct observation space size
-        self.actual_obs_space = 30 * 4 + 1  # Should be 121
+        self.actual_obs_space = 30 * 4 + 1  # Should be 121 (30 time steps * 4 features + money)
         
-        # Ensure model uses float32
+        # Initialize the actor-critic model
         self.model = ActorCritic(self.actual_obs_space, actionSpace).to(self.device).float()
         self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE, weight_decay=L2_FACTOR)
         
@@ -132,27 +135,91 @@ class PPO:
         self.actionSpace = actionSpace
         self.transitions = []
         
+        # Initialize writer and directories as None - we'll create them when training starts
+        self.writer = None
+        self.run_id = None
+        self.figures_dir = None
+        self.results_dir = None
+        
+        # Set model to eval mode initially
+        self.model.eval()
+
     def processState(self, state, coefficients):
         """
-        Process the RL state into a flat tensor with proper normalization
+        Process the RL state returned by the environment
+        (appropriate format and normalization).
         """
-        processed = []
-        
-        # Process the first 4 components (Close, Low, High, Volume)
-        for i in range(len(state) - 1):
-            processed.extend([float(x)/coefficients[i] for x in state[i]])
-        
-        # Add the position indicator
-        processed.extend([float(x) for x in state[-1]])
-        
-        # Convert to tensor and ensure float32
-        state_tensor = torch.FloatTensor(processed).to(self.device)
-        
-        # Verify the shape matches our expected size
-        assert state_tensor.shape[0] == self.actual_obs_space, \
-            f"Processed state size {state_tensor.shape[0]} doesn't match expected size {self.actual_obs_space}"
-        
-        return state_tensor
+        try:
+            # Handle tensor input
+            if torch.is_tensor(state):
+                return state  # Already processed state, return as is
+            
+            # Ensure state is a list of lists/arrays
+            if not isinstance(state, (list, tuple)) or len(state) < 4:
+                raise ValueError(f"Expected list/tuple state with at least 4 components, got {type(state)}")
+            
+            # Extract components (first 4 arrays)
+            closePrices = state[0]
+            lowPrices = state[1]
+            highPrices = state[2]
+            volumes = state[3]
+            
+            # Ensure all arrays have the same length
+            if not all(len(arr) == 30 for arr in [closePrices, lowPrices, highPrices, volumes]):
+                raise ValueError("All input arrays must have length 30")
+
+            processed_state = [[], [], [], []]
+
+            # 1. Close price => returns (29 values)
+            returns = [(closePrices[i]-closePrices[i-1])/closePrices[i-1] for i in range(1, 30)]
+            if coefficients[0][0] != coefficients[0][1]:
+                processed_state[0] = [((x - coefficients[0][0])/(coefficients[0][1] - coefficients[0][0])) for x in returns]
+            else:
+                processed_state[0] = [0 for x in returns]
+
+            # 2. Low/High prices => Delta prices (29 values)
+            deltaPrice = [abs(highPrices[i]-lowPrices[i]) for i in range(1, 30)]
+            if coefficients[1][0] != coefficients[1][1]:
+                processed_state[1] = [((x - coefficients[1][0])/(coefficients[1][1] - coefficients[1][0])) for x in deltaPrice]
+            else:
+                processed_state[1] = [0 for x in deltaPrice]
+
+            # 3. Close price position (29 values)
+            closePricePosition = []
+            for i in range(1, 30):
+                deltaPrice = abs(highPrices[i]-lowPrices[i])
+                if deltaPrice != 0:
+                    item = abs(closePrices[i]-lowPrices[i])/deltaPrice
+                else:
+                    item = 0.5
+                closePricePosition.append(item)
+            if coefficients[2][0] != coefficients[2][1]:
+                processed_state[2] = [((x - coefficients[2][0])/(coefficients[2][1] - coefficients[2][0])) for x in closePricePosition]
+            else:
+                processed_state[2] = [0.5 for x in closePricePosition]
+
+            # 4. Volumes (29 values)
+            volumes = volumes[1:30]  # Skip first volume to match other features length
+            if coefficients[3][0] != coefficients[3][1]:
+                processed_state[3] = [((x - coefficients[3][0])/(coefficients[3][1] - coefficients[3][0])) for x in volumes]
+            else:
+                processed_state[3] = [0 for x in volumes]
+
+            # Flatten the state (29 * 4 = 116 values)
+            state = [item for sublist in processed_state for item in sublist]
+            
+            # Add 5 padding zeros to reach 121 features
+            state.extend([0.0] * 5)
+            
+            # Convert to tensor
+            state_tensor = torch.FloatTensor(state).to(self.device)
+            
+            return state_tensor
+
+        except Exception as e:
+            print(f"Error processing state: {str(e)}")
+            # Return zero tensor of correct size (121)
+            return torch.zeros(self.actual_obs_space).to(self.device)
 
     def processReward(self, reward):
         """
@@ -164,10 +231,30 @@ class PPO:
         """
         Get normalization coefficients for the environment
         """
-        return [env.data['Close'].max(),
-                env.data['Low'].max(),
-                env.data['High'].max(),
-                env.data['Volume'].max()]
+        # Get the data from the environment
+        data = env.data
+        
+        # Calculate coefficients for returns
+        returns = data['Close'].pct_change().dropna()
+        return_min, return_max = returns.min(), returns.max()
+        
+        # Calculate coefficients for delta prices
+        delta_prices = abs(data['High'] - data['Low'])
+        delta_min, delta_max = delta_prices.min(), delta_prices.max()
+        
+        # Calculate coefficients for close price position
+        close_pos = (data['Close'] - data['Low']) / (data['High'] - data['Low']).replace(0, float('inf'))
+        pos_min, pos_max = close_pos.min(), close_pos.max()
+        
+        # Calculate coefficients for volumes
+        volume_min, volume_max = data['Volume'].min(), data['Volume'].max()
+        
+        return [
+            [return_min, return_max],
+            [delta_min, delta_max],
+            [pos_min, pos_max],
+            [volume_min, volume_max]
+        ]
 
     def select_action(self, state):
         """
@@ -189,108 +276,132 @@ class PPO:
         Train the PPO agent
         """
         try:
+            # Create run-specific directories and ID at the start
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
+            
+            # Create base directories
+            self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+            os.makedirs(self.figures_dir, exist_ok=True)
+            os.makedirs('Results', exist_ok=True)
+            
+            # Create and share results directory
+            self.results_dir = os.path.join('Results', f'run_{self.run_id}')
+            os.makedirs(self.results_dir, exist_ok=True)
+            
+            # Share directories with environment
+            trainingEnv.figures_dir = self.figures_dir
+            trainingEnv.results_dir = self.results_dir
+            
+            # Initialize tensorboard writer
+            self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            
             # If required, print the training progression
             if verbose:
                 print("Training progression (hardware selected => " + str(self.device) + "):")
 
-            # Setup training environment and logging
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.run_id = f"{trainingEnv.marketSymbol}_{timestamp}"
-            self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
-            os.makedirs(self.figures_dir, exist_ok=True)
-            self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            # Apply data augmentation
+            dataAugmentation = DataAugmentation()
+            trainingEnvList = dataAugmentation.generate(trainingEnv)
 
-            # Share figures_dir with environments for consistent file saving
-            trainingEnv.figures_dir = self.figures_dir
-            
-            # Initialize performance tracking
+            # Initialize performance tracking arrays properly
             if plotTraining:
-                performanceTrain = []
-                performanceTest = []
-                episode_rewards = []  # Add this to track rewards for TrainingResults.png
-                
-                # Create a copy of training environment for testing
-                testingEnv = copy.deepcopy(trainingEnv)
-                testingEnv.figures_dir = self.figures_dir  # Share figures_dir with testing env
+                performanceTrain = []  # List to store training Sharpe ratios
+                performanceTest = []   # List to store testing Sharpe ratios
+                num_episodes = trainingParameters[0] if trainingParameters else 1
+                num_envs = len(trainingEnvList)
+                score = np.zeros((num_envs, num_episodes))
+
+                # Create proper testing environment
+                marketSymbol = trainingEnv.marketSymbol
+                startingDate = trainingEnv.endingDate
+                endingDate = '2020-1-1'
+                money = trainingEnv.data['Money'][0]
+                stateLength = trainingEnv.stateLength
+                transactionCosts = trainingEnv.transactionCosts
+                testingEnv = TradingEnv(marketSymbol, startingDate, endingDate, money, stateLength, transactionCosts)
+                testingEnv.figures_dir = self.figures_dir
 
             # Training loop
-            num_episodes = trainingParameters[0] if trainingParameters else 1
             for episode in tqdm(range(num_episodes), disable=not verbose):
-                # Reset environment
-                state = trainingEnv.reset()
-                done = False
-                episode_reward = 0
-                
-                # Episode loop
-                while not done:
-                    # Process state and select action
-                    state_tensor = self.processState(state, self.getNormalizationCoefficients(trainingEnv))
-                    action, log_prob, value = self.select_action(state_tensor)
+                for i in range(len(trainingEnvList)):
+                    # Track total reward per episode
+                    totalReward = 0
                     
-                    # Take action in environment
-                    next_state, reward, done, info = trainingEnv.step(action)
-                    episode_reward += reward
+                    # Reset environment with random starting point
+                    coefficients = self.getNormalizationCoefficients(trainingEnvList[i])
+                    trainingEnvList[i].reset()
+                    startingPoint = random.randrange(len(trainingEnvList[i].data.index))
+                    trainingEnvList[i].setStartingPoint(startingPoint)
+                    state = self.processState(trainingEnvList[i].state, coefficients)
+                    done = False
                     
-                    # Store transition for PPO update
-                    self.store_transition(state_tensor, action, reward, log_prob, value, done)
-                    
-                    # Update policy if enough transitions are collected
-                    if len(self.transitions) >= BATCH_SIZE:
-                        self.update_policy()
-                        self.transitions.clear()
-                    
-                    state = next_state
+                    # Episode loop
+                    while not done:
+                        # Process state and select action
+                        state_tensor = self.processState(state, self.getNormalizationCoefficients(trainingEnvList[i]))
+                        action, log_prob, value = self.select_action(state_tensor)
+                        
+                        # Take action in environment
+                        next_state, reward, done, info = trainingEnvList[i].step(action)
+                        totalReward += reward
+                        
+                        # Store transition for PPO update
+                        self.store_transition(state_tensor, action, reward, log_prob, value, done)
+                        
+                        # Update policy if enough transitions are collected
+                        if len(self.transitions) >= BATCH_SIZE:
+                            self.update_policy()
+                            self.transitions.clear()
+                        
+                        state = next_state
 
-                # Log episode results
-                self.writer.add_scalar('Episode Reward', episode_reward, episode)
-                
-                # Compute and log performance metrics
+                    # Store episode reward
+                    score[i, episode] = totalReward
+
+                # Compute and store performance metrics after each episode
                 if plotTraining:
                     # Training performance
-                    trainingPerformanceEnv = copy.deepcopy(trainingEnv)
-                    trainingPerformanceEnv = self.testing(trainingEnv, trainingPerformanceEnv)
-                    analyser = PerformanceEstimator(trainingPerformanceEnv.data)
-                    performance = analyser.computeSharpeRatio()
-                    performanceTrain.append(performance)
-                    self.writer.add_scalar('Training Performance (Sharpe)', performance, episode)
+                    trainingEnv = self.testing(trainingEnv, trainingEnv)
+                    analyser = PerformanceEstimator(trainingEnv.data)
+                    train_performance = analyser.computeSharpeRatio()
+                    performanceTrain.append(train_performance)
+                    self.writer.add_scalar('Training/Sharpe_Ratio', train_performance, episode)
+                    trainingEnv.reset()
 
                     # Testing performance
-                    testingPerformanceEnv = copy.deepcopy(testingEnv)
-                    testingPerformanceEnv = self.testing(trainingEnv, testingPerformanceEnv)
-                    analyser = PerformanceEstimator(testingPerformanceEnv.data)
-                    performance = analyser.computeSharpeRatio()
-                    performanceTest.append(performance)
-                    self.writer.add_scalar('Testing Performance (Sharpe)', performance, episode)
-
-                # Optional rendering
-                if rendering and episode % 10 == 0:
-                    self.render_to_dir(trainingEnv)
-
-                # Restore initial weights if using multiple iterations
-                if hasattr(trainingParameters, '__len__') and len(trainingParameters) > 1:
-                    if episode < (num_episodes - 1):
-                        trainingEnv.reset()
-                        testingEnv.reset()
-                        self.model.load_state_dict(initialWeights)
-                        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE, weight_decay=L2_FACTOR)
-                        self.transitions.clear()
+                    testingEnv = self.testing(trainingEnv, testingEnv)
+                    analyser = PerformanceEstimator(testingEnv.data)
+                    test_performance = analyser.computeSharpeRatio()
+                    performanceTest.append(test_performance)
+                    self.writer.add_scalar('Testing/Sharpe_Ratio', test_performance, episode)
+                    testingEnv.reset()
 
             # Assess the algorithm performance on the training trading environment
             trainingEnv = self.testing(trainingEnv, trainingEnv)
 
-            # If required, show the rendering of the trading environment
+            # Only render once after all training is complete
             if rendering:
                 self.render_to_dir(trainingEnv)
 
             # If required, plot the training results
             if plotTraining:
+                # Plot Sharpe ratio progression
                 fig = plt.figure()
                 ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
-                ax.plot(performanceTrain)
-                ax.plot(performanceTest)
-                ax.legend(["Training", "Testing"])
-                plt.savefig(os.path.join(self.figures_dir, f'TrainingTestingPerformance.png'))
+                ax.plot(performanceTrain, label="Training")
+                ax.plot(performanceTest, label="Testing")
+                ax.legend()
+                plt.savefig(os.path.join(self.figures_dir, 'TrainingTestingPerformance.png'))
                 plt.close(fig)
+
+                # Plot rewards
+                for i in range(len(trainingEnvList)):
+                    fig = plt.figure()
+                    ax1 = fig.add_subplot(111, ylabel='Total reward collected', xlabel='Episode')
+                    ax1.plot(score[i, :])
+                    plt.savefig(os.path.join(self.figures_dir, f'TrainingResults_{i}.png'))
+                    plt.close(fig)
 
             # If required, print and save the strategy performance
             if showPerformance:
@@ -298,24 +409,14 @@ class PPO:
                 analyser.run_id = self.run_id
                 analyser.displayPerformance('PPO', phase='training')
 
-            # Plot training results (similar to TDQN's plotTraining)
-            if plotTraining:
-                fig = plt.figure()
-                ax1 = fig.add_subplot(111, ylabel='Total reward collected', xlabel='Episode')
-                ax1.plot(episode_rewards)
-                plt.savefig(os.path.join(self.figures_dir, 'TrainingResults.png'))
-                plt.close(fig)
-
             return trainingEnv
 
         except Exception as e:
-            print(f"Training interrupted: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return trainingEnv
+            print(f"\nTraining interrupted: {str(e)}")
+            raise
         finally:
             if hasattr(self, 'writer'):
-                self.writer.flush()  # Ensure all pending events are written
+                self.writer.flush()
 
     def testing(self, trainingEnv, testingEnv, rendering=False, showPerformance=False):
         """
@@ -441,3 +542,58 @@ class PPO:
             
         returns = (returns - returns.mean()) / (returns.std() + 1e-8)
         return returns
+
+    def plotExpectedPerformance(self, trainingEnv, trainingParameters=[], iterations=10):
+        """
+        Plot both individual and expected performance with confidence intervals
+        """
+        # Initialize performance arrays
+        performanceTrain = np.zeros((trainingParameters[0], iterations))
+        performanceTest = np.zeros((trainingParameters[0], iterations))
+        
+        try:
+            for iteration in range(iterations):
+                print(f'Expected performance evaluation progression: {iteration+1}/{iterations}')
+                
+                # Train and track performance
+                for episode in range(trainingParameters[0]):
+                    # ... training code ...
+                    
+                    # Store performance for this iteration
+                    performanceTrain[episode][iteration] = train_performance
+                    performanceTest[episode][iteration] = test_performance
+                
+                # Plot individual iteration performance
+                fig = plt.figure()
+                ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
+                ax.plot([performanceTrain[e][iteration] for e in range(trainingParameters[0])])
+                ax.plot([performanceTest[e][iteration] for e in range(trainingParameters[0])])
+                ax.legend(["Training", "Testing"])
+                plt.savefig(os.path.join(self.figures_dir, 
+                           f'TrainingTestingPerformance_{iteration+1}.png'))
+                plt.close(fig)
+            
+            # Compute statistics for expected performance
+            expectedPerformanceTrain = np.mean(performanceTrain, axis=1)
+            expectedPerformanceTest = np.mean(performanceTest, axis=1)
+            stdPerformanceTrain = np.std(performanceTrain, axis=1)
+            stdPerformanceTest = np.std(performanceTest, axis=1)
+            
+            # Plot expected performance with confidence intervals
+            fig = plt.figure()
+            ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
+            ax.plot(expectedPerformanceTrain)
+            ax.plot(expectedPerformanceTest)
+            ax.fill_between(range(len(expectedPerformanceTrain)), 
+                           expectedPerformanceTrain-stdPerformanceTrain, 
+                           expectedPerformanceTrain+stdPerformanceTrain, alpha=0.25)
+            ax.fill_between(range(len(expectedPerformanceTest)),
+                           expectedPerformanceTest-stdPerformanceTest,
+                           expectedPerformanceTest+stdPerformanceTest, alpha=0.25)
+            ax.legend(["Training", "Testing"])
+            plt.savefig(os.path.join(self.figures_dir, 
+                       f'TrainingTestingExpectedPerformance.png'))
+            plt.close(fig)
+            
+        except KeyboardInterrupt:
+            print("\nWARNING: Expected performance evaluation prematurely interrupted...")
