@@ -17,11 +17,12 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 from collections import deque
 from tradingPerformance import PerformanceEstimator
-from pathlib import Path
+from dataAugmentation import DataAugmentation  # Make sure this is imported
+from tradingEnv import TradingEnv  # Ensure this is available
 import pandas as pd
 import traceback
 
-# Create Figures directory if it doesn't exist (like TDQN does)
+# Create Figures directory if it doesn't exist
 if not os.path.exists('Figs'):
     os.makedirs('Figs')
 
@@ -105,8 +106,7 @@ class PPO:
         self.device = device
         
         # Calculate input size based on state structure
-        # state = [prices(30) + lows(30) + highs(30) + volumes(30) + position(1)] = 121 total features
-        self.input_size = 121  # Hardcode to match environment state size
+        self.input_size = state_dim  # Use the actual state dimension
         self.num_actions = action_dim  # Should be 2 (long/short)
         
         print(f"Initializing PPO with input size: {self.input_size}, action size: {self.num_actions}")
@@ -124,7 +124,7 @@ class PPO:
         self.figures_dir = os.path.join('Figs', f'run_{self.run_id}')
         os.makedirs(self.figures_dir, exist_ok=True)
         
-        # Initialize TensorBoard writer (matching TDQN format)
+        # Initialize TensorBoard writer
         self.writer = SummaryWriter(f'runs/run_{self.run_id}')
         
         # Initialize training step counter
@@ -139,45 +139,94 @@ class PPO:
         self.prev_action = None
         self.prev_state = None
 
-    def processState(self, state, info=None):
-        """Process the state from the environment to match network input"""
-        # State from trading env is a list of lists [prices, lows, highs, volumes, position]
-        if isinstance(state, list):
-            # Flatten the lists and concatenate
-            flattened = []
-            for sublist in state:
-                if isinstance(sublist, list):
-                    flattened.extend(sublist)  # For price histories (30 values each)
-                else:
-                    flattened.append(float(sublist))  # For position (single value)
-            
-            # Verify dimensions
-            if len(flattened) != self.input_size:
-                print(f"Warning: State dimension mismatch. Expected {self.input_size}, got {len(flattened)}")
-                print(f"State structure: {[len(x) if isinstance(x, list) else 1 for x in state]}")
-            
-            return flattened
-        
-        # If state is already flat, ensure all elements are float
-        if isinstance(state, (list, np.ndarray)):
-            return [float(x) for x in state]
-        
+    def getNormalizationCoefficients(self, tradingEnv):
+        """
+        Same as in TDQN
+        """
+        # Retrieve the available trading data
+        tradingData = tradingEnv.data
+        closePrices = tradingData['Close'].tolist()
+        lowPrices = tradingData['Low'].tolist()
+        highPrices = tradingData['High'].tolist()
+        volumes = tradingData['Volume'].tolist()
+
+        # Retrieve the coefficients required for the normalization
+        coefficients = []
+        margin = 1
+        # 1. Close price => returns (absolute) => maximum value (absolute)
+        returns = [abs((closePrices[i]-closePrices[i-1])/closePrices[i-1]) for i in range(1, len(closePrices))]
+        coeffs = (0, np.max(returns)*margin)
+        coefficients.append(coeffs)
+        # 2. Low/High prices => Delta prices => maximum value
+        deltaPrice = [abs(highPrices[i]-lowPrices[i]) for i in range(len(lowPrices))]
+        coeffs = (0, np.max(deltaPrice)*margin)
+        coefficients.append(coeffs)
+        # 3. Close/Low/High prices => Close price position => no normalization required
+        coeffs = (0, 1)
+        coefficients.append(coeffs)
+        # 4. Volumes => minimum and maximum values
+        coeffs = (np.min(volumes)/margin, np.max(volumes)*margin)
+        coefficients.append(coeffs)
+
+        return coefficients
+
+    def processState(self, state, coefficients):
+        """
+        Process the RL state returned by the environment
+        (appropriate format and normalization), similar to TDQN
+        """
+        # Normalization of the RL state
+        closePrices = [state[0][i] for i in range(len(state[0]))]
+        lowPrices = [state[1][i] for i in range(len(state[1]))]
+        highPrices = [state[2][i] for i in range(len(state[2]))]
+        volumes = [state[3][i] for i in range(len(state[3]))]
+
+        # 1. Close price => returns => MinMax normalization
+        returns = [(closePrices[i]-closePrices[i-1])/closePrices[i-1] for i in range(1, len(closePrices))]
+        if coefficients[0][0] != coefficients[0][1]:
+            state[0] = [((x - coefficients[0][0])/(coefficients[0][1] - coefficients[0][0])) for x in returns]
+        else:
+            state[0] = [0 for x in returns]
+        # 2. Low/High prices => Delta prices => MinMax normalization
+        deltaPrice = [abs(highPrices[i]-lowPrices[i]) for i in range(1, len(lowPrices))]
+        if coefficients[1][0] != coefficients[1][1]:
+            state[1] = [((x - coefficients[1][0])/(coefficients[1][1] - coefficients[1][0])) for x in deltaPrice]
+        else:
+            state[1] = [0 for x in deltaPrice]
+        # 3. Close/Low/High prices => Close price position => No normalization required
+        closePricePosition = []
+        for i in range(1, len(closePrices)):
+            deltaPrice = abs(highPrices[i]-lowPrices[i])
+            if deltaPrice != 0:
+                item = abs(closePrices[i]-lowPrices[i])/deltaPrice
+            else:
+                item = 0.5
+            closePricePosition.append(item)
+        if coefficients[2][0] != coefficients[2][1]:
+            state[2] = [((x - coefficients[2][0])/(coefficients[2][1] - coefficients[2][0])) for x in closePricePosition]
+        else:
+            state[2] = [0.5 for x in closePricePosition]
+        # 4. Volumes => MinMax normalization
+        volumes = [volumes[i] for i in range(1, len(volumes))]
+        if coefficients[3][0] != coefficients[3][1]:
+            state[3] = [((x - coefficients[3][0])/(coefficients[3][1] - coefficients[3][0])) for x in volumes]
+        else:
+            state[3] = [0 for x in volumes]
+
+        # Process the state structure to obtain the appropriate format
+        state = [item for sublist in state for item in sublist]
+
         return state
 
-    def normalize(self, data):
-        """Normalize data to [0, 1] range"""
-        if len(data) == 0:
-            return [0.0]
-        min_val, max_val = np.min(data), np.max(data)
-        if min_val == max_val:
-            return [0.0] * len(data)
-        return ((data - min_val) / (max_val - min_val)).tolist()
+    def processReward(self, reward):
+        """
+        Same as in TDQN
+        """
+        rewardClipping = 1  # Assuming this is a global variable or define it here
+        return np.clip(reward, -rewardClipping, rewardClipping)
 
     def select_action(self, state):
         """Select an action from the current policy"""
-        # Process state if needed
-        state = self.processState(state)
-        
         # Convert to tensor
         state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         
@@ -191,34 +240,11 @@ class PPO:
 
     def store_transition(self, state, action, reward, next_state, done, log_prob, value):
         """Store a transition in memory"""
-        # Process state if it's a list
-        if isinstance(state, list):
-            processed_state = []
-            for sublist in state:
-                if isinstance(sublist, list):
-                    processed_state.extend(sublist)
-                else:
-                    processed_state.append(sublist)
-        else:
-            processed_state = state
-
-        # Process next_state if it's a list
-        if isinstance(next_state, list):
-            processed_next_state = []
-            for sublist in next_state:
-                if isinstance(sublist, list):
-                    processed_next_state.extend(sublist)
-                else:
-                    processed_next_state.append(sublist)
-        else:
-            processed_next_state = next_state
-
-        # Store the processed transition
         self.memory.append({
-            'state': processed_state,
+            'state': state,
             'action': action,
             'reward': float(reward),
-            'next_state': processed_next_state,
+            'next_state': next_state,
             'done': float(done),
             'log_prob': float(log_prob),
             'value': float(value)
@@ -303,7 +329,7 @@ class PPO:
         
         self.memory.clear()
 
-    def training(self, env, trainingParameters=[], verbose=True, rendering=True, plotTraining=True, showPerformance=True):
+    def training(self, trainingEnv, trainingParameters=[], verbose=True, rendering=True, plotTraining=True, showPerformance=True):
         """Train the PPO agent"""
         try:
             num_episodes = trainingParameters[0] if trainingParameters else 1
@@ -311,133 +337,162 @@ class PPO:
             performanceTrain = []  # Track training performance
             performanceTest = []   # Track testing performance
             
-            # Initialize test environment
-            testingEnv = copy.deepcopy(env)
+            # Create run-specific directories and ID
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_id = f"PPO_{trainingEnv.marketSymbol}_{timestamp}"
             
-            # Add figures_dir to environments so simulator can find it
-            env.figures_dir = self.figures_dir
-            testingEnv.figures_dir = self.figures_dir
-
-            for episode in tqdm(range(num_episodes)):
-                state = env.reset()
-                episode_reward = 0
-                done = False
-                steps = 0
-                
-                while not done:
-                    action, log_prob, value = self.select_action(state)
-                    next_state, reward, done, _ = env.step(action)
-                    
-                    self.store_transition(state, action, reward, next_state, done, log_prob, value)
-                    
-                    if len(self.memory) >= PPO_PARAMS['BATCH_SIZE']:
-                        self.update_policy()
-                    
-                    state = next_state
-                    episode_reward += reward
-                    steps += 1
-                
-                # Track episode metrics
-                episode_rewards.append(episode_reward)
-                
-                # Compute training performance (Sharpe Ratio)
-                train_analyser = PerformanceEstimator(env.data)
-                train_sharpe = train_analyser.computeSharpeRatio()
-                performanceTrain.append(train_sharpe)
-                self.writer.add_scalar('Training performance (Sharpe Ratio)', train_sharpe, episode)
-                
-                # Create and evaluate test environment
-                test_env = copy.deepcopy(env)
-                test_env = self.testing(env, test_env, rendering=False, showPerformance=False)
-                test_analyser = PerformanceEstimator(test_env.data)
-                test_sharpe = test_analyser.computeSharpeRatio()
-                performanceTest.append(test_sharpe)
-                self.writer.add_scalar('Testing performance (Sharpe Ratio)', test_sharpe, episode)
-                
-                if verbose:
-                    print(f"\nEpisode {episode}")
-                    print(f"Training Sharpe: {train_sharpe:.3f}")
-                    print(f"Testing Sharpe: {test_sharpe:.3f}")
-                
-                # Plot training results periodically
-                if plotTraining:
-                    self.plotTraining(episode_rewards)
-                
-                if rendering:
-                    self.render_to_dir(env)
-                    # After testing is complete, move the rendering
-                    self.move_rendering_to_dir(env)
-            
-            # Ensure directory exists before saving final plots
+            # Create base directories
+            self.figures_dir = os.path.join('Figs', f'run_{self.run_id}')
             os.makedirs(self.figures_dir, exist_ok=True)
+            os.makedirs('Results', exist_ok=True)
             
-            # Plot final training/testing performance comparison
+            # Initialize tensorboard writer
+            self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            
+            # Pass the directories to the training environment
+            trainingEnv.figures_dir = self.figures_dir
+            trainingEnv.results_dir = self.figures_dir
+            
+            # Apply data augmentation techniques to improve the training set
+            dataAugmentation = DataAugmentation()
+            trainingEnvList = dataAugmentation.generate(trainingEnv)
+            
+            # Initialize testing environment
+            if plotTraining or showPerformance:
+                marketSymbol = trainingEnv.marketSymbol
+                startingDate = trainingEnv.endingDate
+                endingDate = '2020-1-1'  # Adjust the ending date as needed
+                money = trainingEnv.data['Money'][0]
+                stateLength = trainingEnv.stateLength
+                transactionCosts = trainingEnv.transactionCosts
+                testingEnv = TradingEnv(marketSymbol, startingDate, endingDate, money, stateLength, transactionCosts)
+                performanceTest = []
+            
+            # If required, print the training progression
+            if verbose:
+                print("Training progression (hardware selected => " + str(self.device) + "):")
+            
+            for episode in tqdm(range(num_episodes), disable=not(verbose)):
+                # For each episode, train on the entire set of training environments
+                for env_instance in trainingEnvList:
+                    # Set the initial RL variables
+                    coefficients = self.getNormalizationCoefficients(env_instance)
+                    env_instance.reset()
+                    startingPoint = random.randrange(len(env_instance.data.index))
+                    env_instance.setStartingPoint(startingPoint)
+                    state = self.processState(env_instance.state, coefficients)
+                    done = False
+                    steps = 0
+                    
+                    # Interact with the training environment until termination
+                    while not done:
+                        # Choose an action according to the RL policy and the current RL state
+                        action, log_prob, value = self.select_action(state)
+                        
+                        # Interact with the environment with the chosen action
+                        nextState, reward, done, info = env_instance.step(action)
+                        
+                        # Process the RL variables retrieved and store the experience
+                        reward = self.processReward(reward)
+                        nextState_processed = self.processState(nextState, coefficients)
+                        self.store_transition(state, action, reward, nextState_processed, done, log_prob, value)
+                        
+                        # Execute the PPO learning procedure
+                        if len(self.memory) >= PPO_PARAMS['BATCH_SIZE']:
+                            self.update_policy()
+                        
+                        # Update the RL state
+                        state = nextState_processed
+                        steps += 1
+                    
+                    # Continuous tracking of the training performance
+                    if plotTraining:
+                        totalReward = sum([t['reward'] for t in self.memory])
+                        episode_rewards.append(totalReward)
+                
+                # Compute both training and testing current performances
+                if plotTraining or showPerformance:
+                    # Training set performance
+                    trainingEnv = self.testing(trainingEnv, trainingEnv, rendering=False, showPerformance=False)
+                    analyser = PerformanceEstimator(trainingEnv.data)
+                    performance = analyser.computeSharpeRatio()
+                    performanceTrain.append(performance)
+                    self.writer.add_scalar('Training performance (Sharpe Ratio)', performance, episode)
+                    trainingEnv.reset()
+                    # Testing set performance
+                    testingEnv = self.testing(trainingEnv, testingEnv, rendering=False, showPerformance=False)
+                    analyser = PerformanceEstimator(testingEnv.data)
+                    performance = analyser.computeSharpeRatio()
+                    performanceTest.append(performance)
+                    self.writer.add_scalar('Testing performance (Sharpe Ratio)', performance, episode)
+                    testingEnv.reset()
+                
+            # Assess the algorithm performance on the training trading environment
+            trainingEnv = self.testing(trainingEnv, trainingEnv)
+            
+            # If required, show the rendering of the trading environment
+            if rendering:
+                self.render_to_dir(trainingEnv)
+            
+            # If required, plot the training results
             if plotTraining:
                 fig = plt.figure()
                 ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
                 ax.plot(performanceTrain)
                 ax.plot(performanceTest)
                 ax.legend(["Training", "Testing"])
-                plt.savefig(os.path.join(self.figures_dir, 'TrainingTestingPerformance.png'))
+                plt.savefig(os.path.join(self.figures_dir, f'TrainingTestingPerformance.png'))
                 plt.close(fig)
                 
                 self.plotTraining(episode_rewards)
             
-            return env
+            # If required, print and save the strategy performance
+            if showPerformance:
+                analyser = PerformanceEstimator(trainingEnv.data)
+                analyser.run_id = self.run_id  # Pass the full run_id
+                analyser.displayPerformance('PPO', phase='training')
             
-        except KeyboardInterrupt:
-            print("\nTraining interrupted by user")
-            return env
+            return trainingEnv
             
         except Exception as e:
             print(f"Training error: {str(e)}")
             raise
         finally:
             if self.writer is not None:
-                self.writer.close()
+                self.writer.flush()  # Ensure all pending events are written
 
     def testing(self, trainingEnv, testingEnv, rendering=True, showPerformance=True):
         """Test the trained policy on new data"""
         try:
             self.network.eval()  # Set to evaluation mode
+            coefficients = self.getNormalizationCoefficients(trainingEnv)
             state = testingEnv.reset()
+            state = self.processState(state, coefficients)
             done = False
             episode_reward = 0
             actions_taken = []
             
             with torch.no_grad():
                 while not done:
-                    state = self.processState(state, None)
-                    action_probs, _ = self.network(state)
+                    # Choose an action according to the RL policy and the current RL state
+                    action_probs, _ = self.network(torch.FloatTensor(state).unsqueeze(0).to(self.device))
+                    action = torch.argmax(action_probs, dim=1).item()
                     
-                    # Add some exploration during testing
-                    if random.random() < 0.1:  # 10% exploration
-                        action = random.choice([0, 1])  # Binary action space
-                    else:
-                        action = torch.argmax(action_probs).item()
-                    
-                    next_state, reward, done, info = testingEnv.step(action)
+                    # Interact with the environment with the chosen action
+                    nextState, reward, done, _ = testingEnv.step(action)
+                    state = self.processState(nextState, coefficients)
                     episode_reward += reward
                     actions_taken.append(action)
-                    state = next_state
             
-            # Log action distribution
-            action_counts = {
-                "Short (0)": actions_taken.count(0),
-                "Long (1)": actions_taken.count(1)
-            }
-            print("\nAction Distribution during testing:")
-            total_actions = len(actions_taken)
-            for action_name, count in action_counts.items():
-                print(f"{action_name}: {count} times ({count/total_actions*100:.1f}%)")
+            # If required, show the rendering of the testing environment
+            if rendering:
+                self.render_to_dir(testingEnv)
             
-            # Show performance if requested
+            # If required, compute and display the strategy performance
             if showPerformance:
                 analyser = PerformanceEstimator(testingEnv.data)
-                performance = analyser.computePerformance()
-                print("\nTesting Performance:")
-                for metric, value in performance:
-                    print(f"{metric}: {value}")
+                analyser.run_id = self.run_id
+                analyser.displayPerformance('PPO', phase='testing')
             
             return testingEnv
             
@@ -456,64 +511,7 @@ class PPO:
         except Exception as e:
             print(f"Error in plotTraining: {str(e)}")
 
-    def plotEntireTrading(self, trainingEnv, testingEnv):
-        """Plot the entire trading activity, matching TDQN's implementation"""
-        try:
-            # Get splitting date from the environment
-            splitting_date = testingEnv.startingDate  # Use testing env's start date as split point
-            
-            # Artificial trick to assert the continuity of the Money curve
-            ratio = trainingEnv.data['Money'][-1]/testingEnv.data['Money'][0]
-            testingEnv.data['Money'] = ratio * testingEnv.data['Money']
-
-            # Concatenation of the training and testing trading dataframes
-            dataframes = [trainingEnv.data, testingEnv.data]
-            data = pd.concat(dataframes)
-
-            # Set the Matplotlib figure and subplots
-            fig = plt.figure(figsize=(10, 8))
-            ax1 = fig.add_subplot(211, ylabel='Price', xlabel='Time')
-            ax2 = fig.add_subplot(212, ylabel='Capital', xlabel='Time', sharex=ax1)
-
-            # Plot the first graph -> Evolution of the stock market price
-            trainingEnv.data['Close'].plot(ax=ax1, color='blue', lw=2)
-            testingEnv.data['Close'].plot(ax=ax1, color='blue', lw=2, label='_nolegend_') 
-            ax1.plot(data.loc[data['Action'] == 1.0].index, 
-                    data['Close'][data['Action'] == 1.0],
-                    '^', markersize=5, color='green')   
-            ax1.plot(data.loc[data['Action'] == -1.0].index, 
-                    data['Close'][data['Action'] == -1.0],
-                    'v', markersize=5, color='red')
-            
-            # Plot the second graph -> Evolution of the trading capital
-            trainingEnv.data['Money'].plot(ax=ax2, color='blue', lw=2)
-            testingEnv.data['Money'].plot(ax=ax2, color='blue', lw=2, label='_nolegend_') 
-            ax2.plot(data.loc[data['Action'] == 1.0].index, 
-                    data['Money'][data['Action'] == 1.0],
-                    '^', markersize=5, color='green')   
-            ax2.plot(data.loc[data['Action'] == -1.0].index, 
-                    data['Money'][data['Action'] == -1.0],
-                    'v', markersize=5, color='red')
-
-            # Plot the vertical line seperating the training and testing datasets
-            ax1.axvline(pd.Timestamp(splitting_date), color='black', linewidth=2.0)
-            ax2.axvline(pd.Timestamp(splitting_date), color='black', linewidth=2.0)
-            
-            # Generation of the two legends and plotting
-            ax1.legend(["Price", "Long",  "Short", "Train/Test separation"])
-            ax2.legend(["Capital", "Long", "Short", "Train/Test separation"])
-            
-            plt.savefig(os.path.join(self.figures_dir, f'{str(trainingEnv.marketSymbol)}_TrainingTestingRendering.png'))
-            plt.close(fig)
-        except Exception as e:
-            print(f"Error in plotEntireTrading: {str(e)}")
-            traceback.print_exc()  # This will print the full error traceback
-
     def render_to_dir(self, env):
-        """Render environment to directory exactly like TDQN"""
-        env.render()
-        src_path = ''.join(['Figs/', str(env.marketSymbol), '_Rendering', '.png'])
-        dst_path = os.path.join(self.figures_dir, ''.join([str(env.marketSymbol), '_Rendering', '.png']))
         """Render environment to run-specific directory"""
         try:
             env.render()
@@ -551,32 +549,3 @@ class PPO:
         if os.path.exists(src_path):
             shutil.move(src_path, dst_path)
 
-class RunningMeanStd:
-    def __init__(self, epsilon=1e-4, shape=()):
-        self.mean = np.zeros(shape, 'float64')
-        self.var = np.ones(shape, 'float64')
-        self.count = epsilon
-
-    def update(self, x):
-        batch_mean = np.mean(x, axis=0)
-        batch_var = np.var(x, axis=0)
-        batch_count = x.shape[0]
-        self.update_from_moments(batch_mean, batch_var, batch_count)
-
-    def update_from_moments(self, batch_mean, batch_var, batch_count):
-        delta = batch_mean - self.mean
-        tot_count = self.count + batch_count
-
-        new_mean = self.mean + delta * batch_count / tot_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
-        new_var = M2 / tot_count
-
-        self.mean = new_mean
-        self.var = new_var
-        self.count = tot_count
-
-    @property
-    def std(self):
-        return np.sqrt(self.var)
