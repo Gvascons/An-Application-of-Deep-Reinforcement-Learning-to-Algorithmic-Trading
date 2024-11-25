@@ -18,8 +18,6 @@ from matplotlib import pyplot as plt
 from collections import deque
 from tradingPerformance import PerformanceEstimator
 from pathlib import Path
-import pandas as pd
-import traceback
 
 # Create Figures directory if it doesn't exist (like TDQN does)
 if not os.path.exists('Figs'):
@@ -118,17 +116,11 @@ class PPO:
         # Initialize memory
         self.memory = deque(maxlen=PPO_PARAMS['MEMORY_SIZE'])
         
-        # Initialize training tracking with TensorBoard
-        current_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.run_id = f'PPO_{marketSymbol}_{current_time}'
-        self.figures_dir = os.path.join('Figs', f'run_{self.run_id}')
-        os.makedirs(self.figures_dir, exist_ok=True)
-        
-        # Initialize TensorBoard writer (matching TDQN format)
-        self.writer = SummaryWriter(f'runs/run_{self.run_id}')
-        
-        # Initialize training step counter
+        # Initialize training tracking
         self.training_step = 0
+        self.writer = None
+        self.run_id = None
+        self.figures_dir = None
         
         # Initialize performance tracking
         self.best_reward = float('-inf')
@@ -288,107 +280,106 @@ class PPO:
                 
                 # Update network
                 self.optimizer.zero_grad()
-                loss.backward()
+                loss.backward()  # No need for retain_graph here since we're not doing multiple backwards
                 nn.utils.clip_grad_norm_(self.network.parameters(), PPO_PARAMS['MAX_GRAD_NORM'])
                 self.optimizer.step()
-                
-                # Log metrics
-                if self.writer is not None:
-                    self.writer.add_scalar('Loss/total', loss.item(), self.training_step)
-                    self.writer.add_scalar('Loss/policy', policy_loss.item(), self.training_step)
-                    self.writer.add_scalar('Loss/value', value_loss.item(), self.training_step)
-                    self.writer.add_scalar('Loss/entropy', entropy.item(), self.training_step)
                 
                 self.training_step += 1
         
         self.memory.clear()
 
     def training(self, env, trainingParameters=[], verbose=True, rendering=True, plotTraining=True, showPerformance=True):
-        """Train the PPO agent"""
         try:
-            num_episodes = trainingParameters[0] if trainingParameters else 1
-            episode_rewards = []
-            performanceTrain = []  # Track training performance
-            performanceTest = []   # Track testing performance
-            
-            # Initialize test environment
-            testingEnv = copy.deepcopy(env)
-            
-            # Add figures_dir to environments so simulator can find it
-            env.figures_dir = self.figures_dir
-            testingEnv.figures_dir = self.figures_dir
+            # Create timestamp and run ID exactly like TDQN
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_id = f"PPO_{env.marketSymbol}_{timestamp}"
+            #self.run_id = f"PPO_{timestamp}"
 
-            for episode in tqdm(range(num_episodes)):
-                state = env.reset()
-                episode_reward = 0
-                done = False
-                steps = 0
-                
-                while not done:
-                    action, log_prob, value = self.select_action(state)
-                    next_state, reward, done, _ = env.step(action)
-                    
-                    self.store_transition(state, action, reward, next_state, done, log_prob, value)
-                    
-                    if len(self.memory) >= PPO_PARAMS['BATCH_SIZE']:
-                        self.update_policy()
-                    
-                    state = next_state
-                    episode_reward += reward
-                    steps += 1
-                
-                # Track episode metrics
-                episode_rewards.append(episode_reward)
-                
-                # Compute training performance (Sharpe Ratio)
-                train_analyser = PerformanceEstimator(env.data)
-                train_sharpe = train_analyser.computeSharpeRatio()
-                performanceTrain.append(train_sharpe)
-                self.writer.add_scalar('Training performance (Sharpe Ratio)', train_sharpe, episode)
-                
-                # Create and evaluate test environment
-                test_env = copy.deepcopy(env)
-                test_env = self.testing(env, test_env, rendering=False, showPerformance=False)
-                test_analyser = PerformanceEstimator(test_env.data)
-                test_sharpe = test_analyser.computeSharpeRatio()
-                performanceTest.append(test_sharpe)
-                self.writer.add_scalar('Testing performance (Sharpe Ratio)', test_sharpe, episode)
-                
-                if verbose:
-                    print(f"\nEpisode {episode}")
-                    print(f"Training Sharpe: {train_sharpe:.3f}")
-                    print(f"Testing Sharpe: {test_sharpe:.3f}")
-                
-                # Plot training results periodically
-                if plotTraining:
-                    self.plotTraining(episode_rewards)
-                
-                if rendering:
-                    self.render_to_dir(env)
-                    # After testing is complete, move the rendering
-                    self.move_rendering_to_dir(env)
-            
-            # Ensure directory exists before saving final plots
+            # Create run-specific directory under Figures, exactly like TDQN
+            #self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+            self.figures_dir = os.path.join('Figs', f'run_{self.run_id}')
+
             os.makedirs(self.figures_dir, exist_ok=True)
             
-            # Plot final training/testing performance comparison
-            if plotTraining:
-                fig = plt.figure()
-                ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
-                ax.plot(performanceTrain)
-                ax.plot(performanceTest)
-                ax.legend(["Training", "Testing"])
-                plt.savefig(os.path.join(self.figures_dir, 'TrainingTestingPerformance.png'))
-                plt.close(fig)
+            # Initialize tensorboard writer
+            self.writer = SummaryWriter(f'runs/run_{self.run_id}')
+            
+            # Pass directories to environment
+            env.figures_dir = self.figures_dir
+            
+            num_episodes = trainingParameters[0] if trainingParameters else 1000
+            iterations = trainingParameters[1] if len(trainingParameters) > 1 else 1
+            
+            # Initialize tracking arrays
+            performanceTrain = []
+            performanceTest = []
+            episode_rewards = []
+            
+            # Store initial weights
+            initialWeights = copy.deepcopy(self.network.state_dict())
+            
+            try:
+                for episode in tqdm(range(num_episodes)):
+                    state = env.reset()
+                    episode_reward = 0
+                    done = False
+                    steps = 0
+                    
+                    while not done:
+                        action, log_prob, value = self.select_action(state)
+                        next_state, reward, done, _ = env.step(action)
+                        
+                        self.store_transition(state, action, reward, next_state, done, log_prob, value)
+                        
+                        if len(self.memory) >= PPO_PARAMS['BATCH_SIZE']:
+                            self.update_policy()
+                        
+                        state = next_state
+                        episode_reward += reward
+                        steps += 1
+                    
+                    # Track episode metrics
+                    episode_rewards.append(episode_reward)
+                    
+                    # Compute training performance (Sharpe Ratio)
+                    train_analyser = PerformanceEstimator(env.data)
+                    train_sharpe = train_analyser.computeSharpeRatio()
+                    performanceTrain.append(train_sharpe)
+                    self.writer.add_scalar('Training performance (Sharpe Ratio)', train_sharpe, episode)
+                    
+                    # Create and evaluate test environment
+                    test_env = copy.deepcopy(env)
+                    test_env = self.testing(env, test_env, rendering=False, showPerformance=False)
+                    test_analyser = PerformanceEstimator(test_env.data)
+                    test_sharpe = test_analyser.computeSharpeRatio()
+                    performanceTest.append(test_sharpe)
+                    self.writer.add_scalar('Testing performance (Sharpe Ratio)', test_sharpe, episode)
+                    
+                    if verbose:
+                        print(f"\nEpisode {episode}")
+                        print(f"Training Sharpe: {train_sharpe:.3f}")
+                        print(f"Testing Sharpe: {test_sharpe:.3f}")
+                    
+                    # Plot training results periodically
+                    if plotTraining and (episode + 1) % 10 == 0:  # Every 10 episodes
+                        self.plotTraining(episode_rewards)
+                    
+                    if rendering:
+                        self.render_to_dir(env)
                 
-                self.plotTraining(episode_rewards)
-            
-            return env
-            
-        except KeyboardInterrupt:
-            print("\nTraining interrupted by user")
-            return env
-            
+                # Ensure directory exists before saving final plots
+                os.makedirs(self.figures_dir, exist_ok=True)
+                
+                if plotTraining:
+                    self.plot_performance_results(performanceTrain, performanceTest,
+                                               np.std(performanceTrain), np.std(performanceTest))
+                
+                return env
+                
+            except KeyboardInterrupt:
+                print("\nTraining interrupted by user")
+                return env
+                
         except Exception as e:
             print(f"Training error: {str(e)}")
             raise
@@ -448,66 +439,19 @@ class PPO:
     def plotTraining(self, rewards):
         """Plot the training phase results (rewards)"""
         try:
+            # Ensure directory exists
+            Path(self.figures_dir).mkdir(parents=True, exist_ok=True)
+            
             fig = plt.figure()
             ax1 = fig.add_subplot(111, ylabel='Total reward collected', xlabel='Episode')
             ax1.plot(rewards)
-            plt.savefig(os.path.join(self.figures_dir, 'TrainingResults.png'))
+            
+            # Save figure using pathlib
+            save_path = Path(self.figures_dir) / 'TrainingResults.png'
+            plt.savefig(str(save_path))
             plt.close(fig)
         except Exception as e:
             print(f"Error in plotTraining: {str(e)}")
-
-    def plotEntireTrading(self, trainingEnv, testingEnv):
-        """Plot the entire trading activity, matching TDQN's implementation"""
-        try:
-            # Get splitting date from the environment
-            splitting_date = testingEnv.startingDate  # Use testing env's start date as split point
-            
-            # Artificial trick to assert the continuity of the Money curve
-            ratio = trainingEnv.data['Money'][-1]/testingEnv.data['Money'][0]
-            testingEnv.data['Money'] = ratio * testingEnv.data['Money']
-
-            # Concatenation of the training and testing trading dataframes
-            dataframes = [trainingEnv.data, testingEnv.data]
-            data = pd.concat(dataframes)
-
-            # Set the Matplotlib figure and subplots
-            fig = plt.figure(figsize=(10, 8))
-            ax1 = fig.add_subplot(211, ylabel='Price', xlabel='Time')
-            ax2 = fig.add_subplot(212, ylabel='Capital', xlabel='Time', sharex=ax1)
-
-            # Plot the first graph -> Evolution of the stock market price
-            trainingEnv.data['Close'].plot(ax=ax1, color='blue', lw=2)
-            testingEnv.data['Close'].plot(ax=ax1, color='blue', lw=2, label='_nolegend_') 
-            ax1.plot(data.loc[data['Action'] == 1.0].index, 
-                    data['Close'][data['Action'] == 1.0],
-                    '^', markersize=5, color='green')   
-            ax1.plot(data.loc[data['Action'] == -1.0].index, 
-                    data['Close'][data['Action'] == -1.0],
-                    'v', markersize=5, color='red')
-            
-            # Plot the second graph -> Evolution of the trading capital
-            trainingEnv.data['Money'].plot(ax=ax2, color='blue', lw=2)
-            testingEnv.data['Money'].plot(ax=ax2, color='blue', lw=2, label='_nolegend_') 
-            ax2.plot(data.loc[data['Action'] == 1.0].index, 
-                    data['Money'][data['Action'] == 1.0],
-                    '^', markersize=5, color='green')   
-            ax2.plot(data.loc[data['Action'] == -1.0].index, 
-                    data['Money'][data['Action'] == -1.0],
-                    'v', markersize=5, color='red')
-
-            # Plot the vertical line seperating the training and testing datasets
-            ax1.axvline(pd.Timestamp(splitting_date), color='black', linewidth=2.0)
-            ax2.axvline(pd.Timestamp(splitting_date), color='black', linewidth=2.0)
-            
-            # Generation of the two legends and plotting
-            ax1.legend(["Price", "Long",  "Short", "Train/Test separation"])
-            ax2.legend(["Capital", "Long", "Short", "Train/Test separation"])
-            
-            plt.savefig(os.path.join(self.figures_dir, f'{str(trainingEnv.marketSymbol)}_TrainingTestingRendering.png'))
-            plt.close(fig)
-        except Exception as e:
-            print(f"Error in plotEntireTrading: {str(e)}")
-            traceback.print_exc()  # This will print the full error traceback
 
     def render_to_dir(self, env):
         """Render environment to directory exactly like TDQN"""
@@ -526,13 +470,42 @@ class PPO:
         except Exception as e:
             print(f"Error in render_to_dir: {str(e)}")
 
+    def plot_performance_results(self, train_perf, test_perf, train_std, test_std):
+        """Plot training and testing performance with standard deviation"""
+        try:
+            # Create figure exactly like TDQN does
+            fig = plt.figure()
+            ax = fig.add_subplot(111, ylabel='Performance (Sharpe Ratio)', xlabel='Episode')
+            episodes = range(len(train_perf))
+            
+            ax.plot(episodes, train_perf, label='Training', color='blue')
+            ax.plot(episodes, test_perf, label='Testing', color='green')
+            
+            ax.fill_between(episodes,
+                           np.array(train_perf) - train_std,
+                           np.array(train_perf) + train_std,
+                           alpha=0.2, color='blue')
+            ax.fill_between(episodes,
+                           np.array(test_perf) - test_std,
+                           np.array(test_perf) + test_std,
+                           alpha=0.2, color='green')
+            
+            plt.title('Training and Testing Performance')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Save figure exactly like TDQN does
+            plt.savefig(os.path.join(self.figures_dir, 'TrainingTestingExpectedPerformance.png'))
+            plt.close(fig)
+            
+        except Exception as e:
+            print(f"Error in plot_performance_results: {str(e)}")
+            raise
+
     def __del__(self):
         """Cleanup method"""
         if hasattr(self, 'writer') and self.writer is not None:
-            try:
-                self.writer.close()
-            except:
-                pass
+            self.writer.close()
 
     def log_performance_metrics(self, episode, train_sharpe, test_sharpe):
         """Log performance metrics to TensorBoard"""
@@ -542,14 +515,6 @@ class PPO:
             
             # Log the difference between train and test Sharpe ratios to monitor overfitting
             self.writer.add_scalar('Performance/Train_Test_Gap', train_sharpe - test_sharpe, episode)
-
-    def move_rendering_to_dir(self, env):
-        """Move rendering file to the run-specific directory"""
-        src_path = os.path.join('Figs', f'{str(env.marketSymbol)}_TrainingTestingRendering.png')
-        dst_path = os.path.join(self.figures_dir, f'{str(env.marketSymbol)}_TrainingTestingRendering.png')
-        
-        if os.path.exists(src_path):
-            shutil.move(src_path, dst_path)
 
 class RunningMeanStd:
     def __init__(self, epsilon=1e-4, shape=()):

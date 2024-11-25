@@ -156,10 +156,6 @@ class TradingEnv(gym.Env):
         if startingPoint:
             self.setStartingPoint(startingPoint)
 
-        # Add this near the beginning of __init__
-        self.action_space = 2  # 0 for short, 1 for long
-        self.observation_space = 5  # Close, Low, High, Volume, Position
-
 
     def reset(self):
         """
@@ -425,33 +421,4 @@ class TradingEnv(gym.Env):
                       [self.data['Position'][self.t - 1]]]
         if(self.t == self.data.shape[0]):
             self.done = 1
-    
-    def calculate_reward(self, action):
-        """Calculate the reward based on portfolio performance"""
-        current_price = self.data.Close.iloc[self.current_step]
-        prev_price = self.data.Close.iloc[self.current_step - 1]
-        price_change = (current_price - prev_price) / prev_price
-        
-        # Calculate position change
-        position_delta = self.position - self.prev_position
-        
-        # Transaction cost penalty
-        transaction_cost = abs(position_delta) * self.transaction_costs
-        
-        # Calculate reward components
-        price_reward = price_change * self.position  # Reward from price movement
-        holding_cost = -0.0001 * abs(self.position)  # Small penalty for holding positions
-        transaction_penalty = -transaction_cost
-        
-        # Combine rewards
-        reward = price_reward + holding_cost + transaction_penalty
-        
-        # Add penalties for extreme positions
-        if abs(self.position) > 0.8:  # Penalize very large positions
-            reward -= 0.001 * (abs(self.position) - 0.8)
-        
-        # Scale reward to be more meaningful
-        reward *= 100
-        
-        return reward
     

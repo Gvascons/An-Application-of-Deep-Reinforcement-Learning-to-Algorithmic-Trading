@@ -327,7 +327,7 @@ class TradingSimulator:
             save_path = os.path.join(figures_dir, f'{str(trainingEnv.marketSymbol)}_TrainingTestingRendering.png')
         else:
             # Fallback to default directory
-            save_path = ''.join(['Figures/', str(trainingEnv.marketSymbol), '_TrainingTestingRendering', '.png'])
+            save_path = ''.join(['Figs/', str(trainingEnv.marketSymbol), '_TrainingTestingRendering', '.png'])
         
         plt.savefig(save_path)
         plt.close(fig)

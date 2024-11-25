@@ -37,8 +37,8 @@ from tradingEnv import TradingEnv
 import os
 
 # Create Figures directory if it doesn't exist
-if not os.path.exists('Figures'):
-    os.makedirs('Figures')
+if not os.path.exists('Figs'):
+    os.makedirs('Figs')
 
 
 ###############################################################################
@@ -639,7 +639,7 @@ class TDQN:
             self.run_id = f"TDQN_{trainingEnv.marketSymbol}_{timestamp}"
             
             # Create base directories
-            self.figures_dir = os.path.join('Figures', f'run_{self.run_id}')
+            self.figures_dir = os.path.join('Figs', f'run_{self.run_id}')
             os.makedirs(self.figures_dir, exist_ok=True)
             os.makedirs('Results', exist_ok=True)
             
@@ -1098,7 +1098,7 @@ class TDQN:
         env.render()
         
         # Move the file from default location to run directory
-        src_path = ''.join(['Figures/', str(env.marketSymbol), '_Rendering', '.png'])
+        src_path = ''.join(['Figs/', str(env.marketSymbol), '_Rendering', '.png'])
         dst_path = os.path.join(self.figures_dir, ''.join([str(env.marketSymbol), '_Rendering', '.png']))
         
         if os.path.exists(src_path):

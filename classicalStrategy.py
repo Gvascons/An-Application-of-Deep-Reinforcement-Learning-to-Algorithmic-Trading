@@ -599,7 +599,7 @@ class MovingAveragesTF(tradingStrategy):
         # Generate and show the 3D surface plot
         ax.plot_surface(xx, yy, results, cmap=plt.cm.get_cmap('jet'))
         ax.view_init(45, 45)
-        plt.savefig(''.join(['Figures/', str(marketSymbol), '_MATFOptimization3D', '.png']))
+        plt.savefig(''.join(['Figs/', str(marketSymbol), '_MATFOptimization3D', '.png']))
         #plt.show()
 
         # Plot the same information as a 2D graph
@@ -612,7 +612,7 @@ class MovingAveragesTF(tradingStrategy):
                           extent=(bounds[0], bounds[1], bounds[1], bounds[0]))
         plt.colorbar(graph)
         plt.gca().invert_yaxis()
-        plt.savefig(''.join(['Figures/', str(marketSymbol), '_MATFOptimization2D', '.png']))
+        plt.savefig(''.join(['Figs/', str(marketSymbol), '_MATFOptimization2D', '.png']))
         #plt.show()
     
 
@@ -873,7 +873,7 @@ class MovingAveragesMR(tradingStrategy):
         # Generate and show the surface 3D surface plot
         ax.plot_surface(xx, yy, results, cmap=plt.cm.get_cmap('jet'))
         ax.view_init(45, 45)
-        plt.savefig(''.join(['Figures/', str(marketSymbol), '_MAMROptimization3D', '.png']))
+        plt.savefig(''.join(['Figs/', str(marketSymbol), '_MAMROptimization3D', '.png']))
         #plt.show()
 
         # Plot the same information as a 2D graph
@@ -886,6 +886,6 @@ class MovingAveragesMR(tradingStrategy):
                           extent=(bounds[0], bounds[1], bounds[1], bounds[0]))
         plt.colorbar(graph)
         plt.gca().invert_yaxis()
-        plt.savefig(''.join(['Figures/', str(marketSymbol), '_MAMROptimization2D', '.png']))
+        plt.savefig(''.join(['Figs/', str(marketSymbol), '_MAMROptimization2D', '.png']))
         #plt.show()
         
