@@ -231,7 +231,7 @@ class TradingEnv(gym.Env):
         # Stting of some local variables
         t = self.t
         numberOfShares = self.numberOfShares
-        customReward = False
+        self.customReward = False  # Reset custom reward flag
 
         # CASE 1: LONG POSITION
         if(action == 1):
@@ -268,7 +268,7 @@ class TradingEnv(gym.Env):
                     self.numberOfShares -= numberOfSharesToBuy
                     self.data['Cash'][t] = self.data['Cash'][t - 1] - numberOfSharesToBuy * self.data['Close'][t] * (1 + self.transactionCosts)
                     self.data['Holdings'][t] =  - self.numberOfShares * self.data['Close'][t]
-                    customReward = True
+                    self.customReward = True
             # Case b: No position -> Short
             elif(self.data['Position'][t - 1] == 0):
                 self.numberOfShares = math.floor(self.data['Cash'][t - 1]/(self.data['Close'][t] * (1 + self.transactionCosts)))
@@ -290,12 +290,15 @@ class TradingEnv(gym.Env):
         # Update the total amount of money owned by the agent, as well as the return generated
         self.data['Money'][t] = self.data['Holdings'][t] + self.data['Cash'][t]
         self.data['Returns'][t] = (self.data['Money'][t] - self.data['Money'][t-1])/self.data['Money'][t-1]
+        
+        # OLD REWARD CALCULATION
+        # if not customReward:
+        #     self.reward = self.data['Returns'][t]
+        # else:
+        #     self.reward = (self.data['Close'][t-1] - self.data['Close'][t])/self.data['Close'][t-1]
 
-        # Set the RL reward returned to the trading agent
-        if not customReward:
-            self.reward = self.data['Returns'][t]
-        else:
-            self.reward = (self.data['Close'][t-1] - self.data['Close'][t])/self.data['Close'][t-1]
+        # Calculate reward using the enhanced method
+        self.reward = self.calculate_reward()
 
         # Transition to the next trading time step
         self.t = self.t + 1
@@ -309,7 +312,7 @@ class TradingEnv(gym.Env):
 
         # Same reasoning with the other action (exploration trick)
         otherAction = int(not bool(action))
-        customReward = False
+        self.customReward = False  # Reset custom reward flag
         if(otherAction == 1):
             otherPosition = 1
             if(self.data['Position'][t - 1] == 1):
@@ -336,7 +339,7 @@ class TradingEnv(gym.Env):
                     numberOfShares -= numberOfSharesToBuy
                     otherCash = self.data['Cash'][t - 1] - numberOfSharesToBuy * self.data['Close'][t] * (1 + self.transactionCosts)
                     otherHoldings =  - numberOfShares * self.data['Close'][t]
-                    customReward = True
+                    self.customReward = True
             elif(self.data['Position'][t - 1] == 0):
                 numberOfShares = math.floor(self.data['Cash'][t - 1]/(self.data['Close'][t] * (1 + self.transactionCosts)))
                 otherCash = self.data['Cash'][t - 1] + numberOfShares * self.data['Close'][t] * (1 - self.transactionCosts)
@@ -347,7 +350,7 @@ class TradingEnv(gym.Env):
                 otherCash = otherCash + numberOfShares * self.data['Close'][t] * (1 - self.transactionCosts)
                 otherHoldings = - self.numberOfShares * self.data['Close'][t]
         otherMoney = otherHoldings + otherCash
-        if not customReward:
+        if not self.customReward:
             otherReward = (otherMoney - self.data['Money'][t-1])/self.data['Money'][t-1]
         else:
             otherReward = (self.data['Close'][t-1] - self.data['Close'][t])/self.data['Close'][t-1]
@@ -426,32 +429,29 @@ class TradingEnv(gym.Env):
         if(self.t == self.data.shape[0]):
             self.done = 1
     
-    def calculate_reward(self, action):
-        """Calculate the reward based on portfolio performance"""
-        current_price = self.data.Close.iloc[self.current_step]
-        prev_price = self.data.Close.iloc[self.current_step - 1]
-        price_change = (current_price - prev_price) / prev_price
+    def calculate_reward(self):
+        """
+        Calculate a sophisticated reward that considers multiple factors while
+        maintaining compatibility with the existing trading logic.
+        """
+        # If it's a custom reward case (specific short position scenario)
+        if self.customReward:
+            return (self.data['Close'][self.t-1] - self.data['Close'][self.t])/self.data['Close'][t-1]
         
-        # Calculate position change
-        position_delta = self.position - self.prev_position
+        # Standard case: Enhanced reward calculation
+        base_return = self.data['Returns'][self.t]  # Already includes transaction costs
         
-        # Transaction cost penalty
-        transaction_cost = abs(position_delta) * self.transaction_costs
+        # Add risk-adjustment components
+        returns = self.data['Returns'][max(0, self.t - self.stateLength):self.t]
+        downside_returns = returns[returns < 0]
+        downside_risk = np.std(downside_returns) if len(downside_returns) > 0 else 0
+        risk_penalty = -0.05 * downside_risk
         
-        # Calculate reward components
-        price_reward = price_change * self.position  # Reward from price movement
-        holding_cost = -0.0001 * abs(self.position)  # Small penalty for holding positions
-        transaction_penalty = -transaction_cost
+        # Combine components
+        reward = base_return + risk_penalty
         
-        # Combine rewards
-        reward = price_reward + holding_cost + transaction_penalty
-        
-        # Add penalties for extreme positions
-        if abs(self.position) > 0.8:  # Penalize very large positions
-            reward -= 0.001 * (abs(self.position) - 0.8)
-        
-        # Scale reward to be more meaningful
-        reward *= 100
+        # Scale final reward
+        reward *= 10
         
         return reward
     
