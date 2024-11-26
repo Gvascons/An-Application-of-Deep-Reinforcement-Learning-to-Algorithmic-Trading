@@ -17,8 +17,8 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 from collections import deque
 from tradingPerformance import PerformanceEstimator
-from dataAugmentation import DataAugmentation  # Make sure this is imported
-from tradingEnv import TradingEnv  # Ensure this is available
+from dataAugmentation import DataAugmentation  # Ensure this is imported
+from tradingEnv_temp import TradingEnv  # Ensure this is available
 import pandas as pd
 import traceback
 
@@ -26,19 +26,19 @@ import traceback
 if not os.path.exists('Figs'):
     os.makedirs('Figs')
 
-# PPO hyperparameters
+# Adjusted PPO hyperparameters
 PPO_PARAMS = {
-    'CLIP_EPSILON': 0.2,
+    'CLIP_EPSILON': 0.3,         # Increased clipping range
     'VALUE_LOSS_COEF': 0.5,
-    'ENTROPY_COEF': 0.01,
+    'ENTROPY_COEF': 0.1,         # Increased entropy coefficient to encourage exploration
     'PPO_EPOCHS': 4,
-    'BATCH_SIZE': 64,
+    'BATCH_SIZE': 32,            # Reduced batch size
     'GAMMA': 0.99,
     'GAE_LAMBDA': 0.95,
-    'LEARNING_RATE': 3e-4,
+    'LEARNING_RATE': 3e-4,       # Adjusted learning rate
     'MAX_GRAD_NORM': 0.5,
     'HIDDEN_SIZE': 256,
-    'MEMORY_SIZE': 10000,
+    'MEMORY_SIZE': 5000,
 }
 
 class PPONetwork(nn.Module):
@@ -60,26 +60,27 @@ class PPONetwork(nn.Module):
             nn.ReLU(),
         )
         
-        # Actor head with smaller architecture
+        # Actor head adjusted for new action space
         self.actor = nn.Sequential(
             nn.Linear(self.feature_dim // 2, self.feature_dim // 4),
             nn.ReLU(),
-            nn.Linear(self.feature_dim // 4, num_actions)
+            nn.Linear(self.feature_dim // 4, num_actions)  # num_actions updated to reflect the action space
         )
         
-        # Critic head with smaller architecture
+        # Critic head remains the same
         self.critic = nn.Sequential(
             nn.Linear(self.feature_dim // 2, self.feature_dim // 4),
             nn.ReLU(),
             nn.Linear(self.feature_dim // 4, 1)
         )
         
-        # Initialize weights with smaller values
+        # Initialize weights with adjusted gain
         self.apply(self._init_weights)
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            nn.init.orthogonal_(module.weight, gain=0.1)
+            # Adjusted weight initialization
+            nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain('relu'))
             if module.bias is not None:
                 module.bias.data.zero_()
 
@@ -94,7 +95,8 @@ class PPONetwork(nn.Module):
             x = x.unsqueeze(0)
             
         features = self.shared(x)
-        action_probs = F.softmax(self.actor(features), dim=-1)
+        action_logits = self.actor(features)
+        action_probs = F.softmax(action_logits, dim=-1)
         value = self.critic(features)
         
         return action_probs, value
@@ -107,7 +109,7 @@ class PPO:
         
         # Calculate input size based on state structure
         self.input_size = state_dim  # Use the actual state dimension
-        self.num_actions = action_dim  # Should be 2 (long/short)
+        self.num_actions = 4  # Actions: 0 = Hold, 1 = Buy, 2 = Sell, 3 = Close
         
         print(f"Initializing PPO with input size: {self.input_size}, action size: {self.num_actions}")
         
@@ -216,6 +218,9 @@ class PPO:
         # Process the state structure to obtain the appropriate format
         state = [item for sublist in state for item in sublist]
 
+        # Log the processed state
+        # print(f"Processed State: {state}")
+
         return state
 
     def processReward(self, reward):
@@ -223,7 +228,10 @@ class PPO:
         Same as in TDQN
         """
         rewardClipping = 1  # Assuming this is a global variable or define it here
-        return np.clip(reward, -rewardClipping, rewardClipping)
+        processed_reward = np.clip(reward, -rewardClipping, rewardClipping)
+        # Log the original and processed reward
+        # print(f"Original Reward: {reward}, Processed Reward: {processed_reward}")
+        return processed_reward
 
     def select_action(self, state):
         """Select an action from the current policy"""
@@ -235,6 +243,9 @@ class PPO:
             dist = Categorical(probs)
             action = dist.sample()
             log_prob = dist.log_prob(action)
+        
+        # Log action probabilities and selected action
+        # print(f"Action Probabilities: {probs.cpu().numpy()}, Selected Action: {action.item()}")
         
         return action.item(), log_prob.item(), value.item()
 
@@ -253,6 +264,7 @@ class PPO:
     def update_policy(self):
         """Update policy using PPO"""
         if len(self.memory) < PPO_PARAMS['BATCH_SIZE']:
+            # print(f"Memory Size: {len(self.memory)} - Not enough samples to update policy.")
             return
         
         # Convert stored transitions to tensors
@@ -275,7 +287,11 @@ class PPO:
                 advantages.insert(0, gae)
         
         advantages = torch.tensor(advantages, device=self.device, dtype=torch.float32)
+        # Log raw advantages
+        # print(f"Raw Advantages: {advantages}")
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Log normalized advantages
+        # print(f"Normalized Advantages: {advantages}")
 
         # PPO update
         for _ in range(PPO_PARAMS['PPO_EPOCHS']):
@@ -293,6 +309,7 @@ class PPO:
                 batch_actions = actions[batch_indices]
                 batch_advantages = advantages[batch_indices]
                 batch_old_log_probs = old_log_probs[batch_indices]
+                batch_returns = rewards[batch_indices]
                 
                 # Get current policy outputs
                 probs, values = self.network(batch_states)
@@ -305,7 +322,7 @@ class PPO:
                 surr1 = ratios * batch_advantages
                 surr2 = torch.clamp(ratios, 1-PPO_PARAMS['CLIP_EPSILON'], 1+PPO_PARAMS['CLIP_EPSILON']) * batch_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(values.squeeze(), rewards[batch_indices])
+                value_loss = F.mse_loss(values.squeeze(), batch_returns)
                 
                 # Combine losses
                 loss = (policy_loss + 
@@ -315,10 +332,22 @@ class PPO:
                 # Update network
                 self.optimizer.zero_grad()
                 loss.backward()
+                
+                # Log gradient norms
+                # total_norm = 0
+                # for p in self.network.parameters():
+                #     if p.grad is not None:
+                #         param_norm = p.grad.data.norm(2)
+                #         total_norm += param_norm.item() ** 2
+                # total_norm = total_norm ** 0.5
+                # print(f"Gradient Norm: {total_norm}")
+                
                 nn.utils.clip_grad_norm_(self.network.parameters(), PPO_PARAMS['MAX_GRAD_NORM'])
                 self.optimizer.step()
                 
                 # Log metrics
+                # print(f"Policy Loss: {policy_loss.item()}, Value Loss: {value_loss.item()}, Entropy: {entropy.item()}, Total Loss: {loss.item()}")
+                
                 if self.writer is not None:
                     self.writer.add_scalar('Loss/total', loss.item(), self.training_step)
                     self.writer.add_scalar('Loss/policy', policy_loss.item(), self.training_step)
@@ -336,9 +365,6 @@ class PPO:
             episode_rewards = []
             performanceTrain = []  # Track training performance
             performanceTest = []   # Track testing performance
-            
-            # Add action tracking dictionary
-            action_counts = {0: 0, 1: 0}  # Initialize counters for each action
             
             # Create run-specific directories and ID
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -376,8 +402,9 @@ class PPO:
                 print("Training progression (hardware selected => " + str(self.device) + "):")
             
             for episode in tqdm(range(num_episodes), disable=not(verbose)):
-                # Reset action counts for this episode
-                action_counts = {0: 0, 1: 0}
+                # Initialize action counters
+                action_counts = {action: 0 for action in range(self.num_actions)}
+                total_actions = 0
                 
                 # For each episode, train on the entire set of training environments
                 for env_instance in trainingEnvList:
@@ -395,8 +422,9 @@ class PPO:
                         # Choose an action according to the RL policy and the current RL state
                         action, log_prob, value = self.select_action(state)
                         
-                        # Track action counts
-                        action_counts[action] = action_counts.get(action, 0) + 1
+                        # Update action counters
+                        action_counts[action] += 1
+                        total_actions += 1
                         
                         # Interact with the environment with the chosen action
                         nextState, reward, done, info = env_instance.step(action)
@@ -413,11 +441,31 @@ class PPO:
                         # Update the RL state
                         state = nextState_processed
                         steps += 1
+                        
+                    # Update policy at the end of episode
+                    if len(self.memory) >= PPO_PARAMS['BATCH_SIZE']:
+                        self.update_policy()
                     
                     # Continuous tracking of the training performance
                     if plotTraining:
                         totalReward = sum([t['reward'] for t in self.memory])
                         episode_rewards.append(totalReward)
+                
+                # After the episode
+                # Update action labels
+                action_labels = {0: 'Hold', 1: 'Buy', 2: 'Sell', 3: 'Close'}
+                # After the episode
+                print(f"\nEpisode {episode}")
+                print("Action Distribution during training:")
+                for action in range(self.num_actions):
+                    count = action_counts[action]
+                    percentage = 100 * count / total_actions if total_actions > 0 else 0
+                    action_label = action_labels.get(action, f"Action {action}")
+                    print(f"{action_label} ({action}): {count} times ({percentage:.1f}%)")
+                
+                # Optional: Log to TensorBoard
+                for action in range(self.num_actions):
+                    self.writer.add_scalar(f'Actions/Training_Action_{action}', action_counts[action], episode)
                 
                 # Compute both training and testing current performances
                 if plotTraining or showPerformance:
@@ -436,12 +484,6 @@ class PPO:
                     self.writer.add_scalar('Testing performance (Sharpe Ratio)', performance, episode)
                     testingEnv.reset()
                 
-                # Display action distribution at the end of each episode
-                total_actions = sum(action_counts.values())
-                print(f"\nAction Distribution during episode {episode}:")
-                print(f"Short (0): {action_counts[0]} times ({(action_counts[0]/total_actions)*100:.1f}%)")
-                print(f"Long (1): {action_counts[1]} times ({(action_counts[1]/total_actions)*100:.1f}%)")
-            
             # Assess the algorithm performance on the training trading environment
             trainingEnv = self.testing(trainingEnv, trainingEnv)
             
@@ -479,33 +521,46 @@ class PPO:
     def testing(self, trainingEnv, testingEnv, rendering=True, showPerformance=True):
         """Test the trained policy on new data"""
         try:
-            self.network.eval()
+            self.network.eval()  # Set to evaluation mode
             coefficients = self.getNormalizationCoefficients(trainingEnv)
             state = testingEnv.reset()
             state = self.processState(state, coefficients)
             done = False
-            episode_reward = 0  # Initialize episode_reward
+            episode_reward = 0
             actions_taken = []
-            action_counts = {0: 0, 1: 0}
+            
+            # Initialize action counters
+            action_counts = {action: 0 for action in range(self.num_actions)}
+            total_actions = 0
             
             with torch.no_grad():
                 while not done:
-                    # Use the same sampling method as in training
-                    action, _, _ = self.select_action(state)
+                    # Choose an action according to the RL policy and the current RL state
+                    action_probs, _ = self.network(torch.FloatTensor(state).unsqueeze(0).to(self.device))
+                    action = torch.argmax(action_probs, dim=1).item()
                     
-                    # Track action counts
-                    action_counts[action] = action_counts.get(action, 0) + 1
+                    # Update action counters
+                    action_counts[action] += 1
+                    total_actions += 1
                     
+                    # Interact with the environment with the chosen action
                     nextState, reward, done, _ = testingEnv.step(action)
                     state = self.processState(nextState, coefficients)
                     episode_reward += reward
                     actions_taken.append(action)
             
-            # Display action distribution after testing
-            total_actions = sum(action_counts.values())
+            # After testing
+            action_labels = {0: 'Short', 1: 'Long', 2: 'Hold'}
             print("\nAction Distribution during testing:")
-            print(f"Short (0): {action_counts[0]} times ({(action_counts[0]/total_actions)*100:.1f}%)")
-            print(f"Long (1): {action_counts[1]} times ({(action_counts[1]/total_actions)*100:.1f}%)")
+            for action in range(self.num_actions):
+                count = action_counts[action]
+                percentage = 100 * count / total_actions if total_actions > 0 else 0
+                action_label = action_labels.get(action, f"Action {action}")
+                print(f"{action_label} ({action}): {count} times ({percentage:.1f}%)")
+            
+            # Optional: Log to TensorBoard
+            for action in range(self.num_actions):
+                self.writer.add_scalar(f'Actions/Testing_Action_{action}', action_counts[action])
             
             # If required, show the rendering of the testing environment
             if rendering:
@@ -571,4 +626,3 @@ class PPO:
         
         if os.path.exists(src_path):
             shutil.move(src_path, dst_path)
-
