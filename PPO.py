@@ -106,8 +106,8 @@ class PPO:
         self.device = device
         
         # Calculate input size based on state structure
-        self.input_size = state_dim  # Use the actual state dimension
-        self.num_actions = action_dim  # Should be 2 (long/short)
+        self.input_size = state_dim
+        self.num_actions = action_dim
         
         print(f"Initializing PPO with input size: {self.input_size}, action size: {self.num_actions}")
         
@@ -118,15 +118,6 @@ class PPO:
         # Initialize memory
         self.memory = deque(maxlen=PPO_PARAMS['MEMORY_SIZE'])
         
-        # Initialize training tracking with TensorBoard
-        current_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.run_id = f'PPO_{marketSymbol}_{current_time}'
-        self.figures_dir = os.path.join('Figs', f'run_{self.run_id}')
-        os.makedirs(self.figures_dir, exist_ok=True)
-        
-        # Initialize TensorBoard writer
-        self.writer = SummaryWriter(f'runs/run_{self.run_id}')
-        
         # Initialize training step counter
         self.training_step = 0
         
@@ -135,7 +126,7 @@ class PPO:
         self.trailing_rewards = deque(maxlen=100)
 
         # Additional tracking variables
-        self.market_symbol = marketSymbol  # Store the market symbol
+        self.market_symbol = marketSymbol
         self.prev_action = None
         self.prev_state = None
 
