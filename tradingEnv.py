@@ -291,12 +291,6 @@ class TradingEnv(gym.Env):
         self.data['Money'][t] = self.data['Holdings'][t] + self.data['Cash'][t]
         self.data['Returns'][t] = (self.data['Money'][t] - self.data['Money'][t-1])/self.data['Money'][t-1]
         
-        # OLD REWARD CALCULATION
-        # if not customReward:
-        #     self.reward = self.data['Returns'][t]
-        # else:
-        #     self.reward = (self.data['Close'][t-1] - self.data['Close'][t])/self.data['Close'][t-1]
-
         # Calculate reward using the enhanced method
         self.reward = self.calculate_reward()
 
@@ -431,27 +425,45 @@ class TradingEnv(gym.Env):
     
     def calculate_reward(self):
         """
-        Calculate a sophisticated reward that considers multiple factors while
+        Enhanced reward function that considers multiple trading objectives while
         maintaining compatibility with the existing trading logic.
         """
         # If it's a custom reward case (specific short position scenario)
         if self.customReward:
-            return (self.data['Close'][self.t-1] - self.data['Close'][self.t])/self.data['Close'][t-1]
+            return (self.data['Close'][self.t-1] - self.data['Close'][self.t])/self.data['Close'][self.t-1]
         
         # Standard case: Enhanced reward calculation
-        base_return = self.data['Returns'][self.t]  # Already includes transaction costs
+        # Base return (already includes transaction costs)
+        base_return = self.data['Returns'][self.t]
         
-        # Add risk-adjustment components
-        returns = self.data['Returns'][max(0, self.t - self.stateLength):self.t]
+        # Calculate risk-adjusted components
+        lookback = min(self.stateLength, self.t)
+        returns = self.data['Returns'][max(0, self.t - lookback):self.t]
+        
+        # Downside risk (Sortino ratio component)
         downside_returns = returns[returns < 0]
         downside_risk = np.std(downside_returns) if len(downside_returns) > 0 else 0
-        risk_penalty = -0.05 * downside_risk
+        risk_penalty = -0.1 * downside_risk
         
-        # Combine components
-        reward = base_return + risk_penalty
+        # Position holding incentive (reduce excessive trading)
+        position_change = abs(self.data['Position'][self.t] - self.data['Position'][self.t-1])
+        trading_penalty = -0.001 * position_change
         
-        # Scale final reward
-        reward *= 10
+        # Trend alignment bonus (reward for following the trend)
+        price_trend = (self.data['Close'][self.t] - self.data['Close'][self.t-1]) / self.data['Close'][self.t-1]
+        position = self.data['Position'][self.t]
+        trend_alignment = 0.1 * price_trend * position  # Positive when position aligns with trend
+        
+        # Combine components with weights
+        reward = (
+            1.0 * base_return +  # Main return component
+            0.3 * risk_penalty +  # Risk adjustment
+            0.2 * trading_penalty +  # Trading frequency penalty
+            0.2 * trend_alignment  # Trend alignment bonus
+        )
+        
+        # Scale reward for better learning stability
+        reward = np.clip(reward * 10, -1, 1)
         
         return reward
     
